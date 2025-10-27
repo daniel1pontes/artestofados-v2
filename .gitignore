@@ -1,0 +1,8 @@
+node_modules/
+npm-debug.log
+.env
+uploads/
+whatsapp-session/
+*.pdf
+.DS_Store
+
