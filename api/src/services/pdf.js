@@ -39,7 +39,13 @@ function generateOSPDF(osData) {
       doc.fontSize(14);
       doc.text(`Cliente: ${osData.clientName}`);
       doc.text(`Data: ${new Date(osData.createdAt).toLocaleDateString('pt-BR')}`);
-      doc.text(`Prazo: ${osData.deadline}`);
+      
+      // Format deadline date
+      let deadlineText = osData.deadline;
+      if (osData.deadline && !isNaN(Date.parse(osData.deadline))) {
+        deadlineText = new Date(osData.deadline).toLocaleDateString('pt-BR');
+      }
+      doc.text(`Prazo: ${deadlineText}`);
       doc.text(`Forma de Pagamento: ${osData.payment}`);
       doc.moveDown();
 

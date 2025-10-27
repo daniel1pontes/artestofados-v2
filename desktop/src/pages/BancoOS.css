@@ -58,18 +58,32 @@ td {
   border-bottom: 1px solid #f3f4f6;
 }
 
+/* Destacar coluna de valor total */
+td:nth-child(4) {
+  font-weight: 600;
+  color: #28a745;
+  text-align: left;
+}
+
 tbody tr:hover {
   background-color: #f8f9fa;
 }
 
-.btn-view, .btn-download {
+.action-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn-view, .btn-download, .btn-delete {
   padding: 6px 12px;
-  margin-right: 8px;
   border: none;
   border-radius: 4px;
   font-size: 12px;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: all 0.2s;
+  white-space: nowrap;
 }
 
 .btn-view {
@@ -79,6 +93,7 @@ tbody tr:hover {
 
 .btn-view:hover {
   background-color: #0056b3;
+  transform: translateY(-1px);
 }
 
 .btn-download {
@@ -88,6 +103,27 @@ tbody tr:hover {
 
 .btn-download:hover {
   background-color: #218838;
+  transform: translateY(-1px);
+}
+
+.btn-delete {
+  background-color: #dc3545;
+  color: #ffffff;
+}
+
+.btn-delete:hover {
+  background-color: #c82333;
+  transform: translateY(-1px);
+}
+
+.no-pdf {
+  font-size: 12px;
+  color: #dc3545;
+  font-style: italic;
+  padding: 6px 12px;
+  background-color: #f8d7da;
+  border-radius: 4px;
+  border: 1px solid #f5c6cb;
 }
 
 .modal-overlay {
@@ -118,6 +154,28 @@ tbody tr:hover {
   align-items: center;
   padding: 20px 24px;
   border-bottom: 1px solid #e5e7eb;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.btn-details {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  background-color: #6c757d;
+  color: #ffffff;
+  transition: all 0.2s;
+}
+
+.btn-details:hover {
+  background-color: #545b62;
+  transform: translateY(-1px);
 }
 
 .modal-header h2 {
@@ -202,5 +260,113 @@ tbody tr:hover {
 
 .btn-close-modal:hover {
   background-color: #545b62;
+}
+
+/* Estilos para imagens */
+.os-images {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 16px;
+  margin-top: 16px;
+}
+
+.os-images h3 {
+  font-size: 16px;
+  margin-bottom: 12px;
+  color: #333333;
+}
+
+.images-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.image-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+  background-color: #f8f9fa;
+}
+
+.os-image {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  display: block;
+}
+
+.image-error {
+  padding: 20px;
+  text-align: center;
+  color: #666666;
+  font-size: 12px;
+}
+
+/* Estilos para visualizador de PDF */
+.pdf-modal {
+  max-width: 90vw;
+  max-height: 95vh;
+  width: 1000px;
+}
+
+.pdf-viewer {
+  padding: 0;
+  height: 600px;
+  background-color: #f8f9fa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pdf-viewer iframe {
+  border-radius: 0;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.pdf-fallback {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #f8f9fa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pdf-error {
+  text-align: center;
+  padding: 40px;
+  background-color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  max-width: 400px;
+}
+
+.pdf-error h3 {
+  color: #333333;
+  margin-bottom: 16px;
+}
+
+.pdf-error p {
+  color: #666666;
+  margin-bottom: 24px;
+}
+
+.btn-download-pdf {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  background-color: #28a745;
+  color: #ffffff;
+  transition: all 0.2s;
+}
+
+.btn-download-pdf:hover {
+  background-color: #218838;
+  transform: translateY(-1px);
 }
 

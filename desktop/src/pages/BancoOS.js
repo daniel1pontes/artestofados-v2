@@ -52,16 +52,35 @@ function BancoOS() {
 
   const handleView = async (os) => {
     try {
+      if (!os.pdfPath) {
+        alert('PDF não disponível para esta OS');
+        return;
+      }
+      
       const data = await osAPI.obter(os.id);
-      setSelectedOS(data.os);
+      setSelectedOS({
+        ...data.os,
+        showPDF: true
+      });
     } catch (error) {
       console.error('Error loading OS details:', error);
       alert('Erro ao carregar detalhes da OS: ' + error.message);
     }
   };
 
-  const closeModal = () => {
-    setSelectedOS(null);
+  const handleDelete = async (os) => {
+    if (!window.confirm(`Tem certeza que deseja excluir a OS #${os.id} do cliente ${os.clientName}?`)) {
+      return;
+    }
+
+    try {
+      await osAPI.deletar(os.id);
+      alert('OS excluída com sucesso!');
+      loadOS(); // Recarregar a lista
+    } catch (error) {
+      console.error('Error deleting OS:', error);
+      alert('Erro ao excluir OS: ' + error.message);
+    }
   };
 
   return (
@@ -91,32 +110,47 @@ function BancoOS() {
               <tr>
                 <th>ID</th>
                 <th>Cliente</th>
-                <th>Prazo</th>
                 <th>Pagamento</th>
-                <th>Data</th>
+                <th>Valor Total da OS</th>
+                <th>Prazo de Entrega</th>
                 <th>Ações</th>
               </tr>
             </thead>
             <tbody>
-              {osList.map(os => (
-                <tr key={os.id}>
-                  <td>{os.id}</td>
-                  <td>{os.clientName}</td>
-                  <td>{os.deadline}</td>
-                  <td>{os.payment}</td>
-                  <td>{new Date(os.createdAt).toLocaleDateString('pt-BR')}</td>
-                  <td>
-                    <button onClick={() => handleView(os)} className="btn-view">
-                      👁️ Ver
-                    </button>
-                    {os.pdfPath && (
-                      <button onClick={() => handleDownload(os)} className="btn-download">
-                        📥 Baixar
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {osList.map(os => {
+                // Calcular valor total da OS
+                const items = typeof os.items === 'string' ? JSON.parse(os.items) : os.items || [];
+                const subtotal = items.reduce((sum, item) => sum + parseFloat(item.total || 0), 0);
+                const discount = parseFloat(os.discount || 0);
+                const total = subtotal - discount;
+                
+                return (
+                  <tr key={os.id}>
+                    <td>{os.id}</td>
+                    <td>{os.clientName}</td>
+                    <td>{os.payment}</td>
+                    <td>R$ {total.toFixed(2)}</td>
+                    <td>{os.deadline}</td>
+                    <td>
+                      <div className="action-buttons">
+                        <button onClick={() => handleView(os)} className="btn-view">
+                          👁️ Ver
+                        </button>
+                        {os.pdfPath ? (
+                          <button onClick={() => handleDownload(os)} className="btn-download">
+                            📥 Baixar PDF
+                          </button>
+                        ) : (
+                          <span className="no-pdf">PDF não disponível</span>
+                        )}
+                        <button onClick={() => handleDelete(os)} className="btn-delete">
+                          🗑️ Excluir
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -124,29 +158,90 @@ function BancoOS() {
 
       {selectedOS && (
         <div className="modal-overlay" onClick={closeModal}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+          <div className={`modal-content ${selectedOS.showPDF ? 'pdf-modal' : ''}`} onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>OS #{selectedOS.id}</h2>
-              <button onClick={closeModal} className="btn-close">×</button>
-            </div>
-            <div className="modal-body">
-              <div className="os-detail">
-                <p><strong>Cliente:</strong> {selectedOS.clientName}</p>
-                <p><strong>Prazo:</strong> {selectedOS.deadline}</p>
-                <p><strong>Pagamento:</strong> {selectedOS.payment}</p>
-                <p><strong>Desconto:</strong> R$ {parseFloat(selectedOS.discount || 0).toFixed(2)}</p>
-                <p><strong>Data:</strong> {new Date(selectedOS.createdAt).toLocaleString('pt-BR')}</p>
+              <div className="modal-actions">
+                {selectedOS.showPDF && (
+                  <button onClick={() => setSelectedOS({...selectedOS, showPDF: false})} className="btn-details">
+                    📋 Detalhes
+                  </button>
+                )}
+                <button onClick={closeModal} className="btn-close">×</button>
               </div>
-              <div className="os-items">
-                <h3>Itens</h3>
-                {(typeof selectedOS.items === 'string' ? JSON.parse(selectedOS.items) : selectedOS.items || []).map((item, index) => (
-                  <div key={index} className="item-detail">
-                    <p><strong>{item.description}</strong></p>
-                    <p>{item.quantity} x R$ {parseFloat(item.unitValue).toFixed(2)} = R$ {parseFloat(item.total).toFixed(2)}</p>
+            </div>
+            
+            {selectedOS.showPDF ? (
+              <div className="pdf-viewer">
+                <iframe
+                  src={`http://localhost:3000/uploads/${selectedOS.pdfPath}`}
+                  width="100%"
+                  height="600px"
+                  style={{ border: 'none' }}
+                  title={`OS ${selectedOS.id} PDF`}
+                  onError={() => {
+                    console.error('Erro ao carregar PDF no iframe');
+                  }}
+                />
+                <div className="pdf-fallback" style={{ display: 'none' }}>
+                  <div className="pdf-error">
+                    <h3>📄 PDF não pode ser exibido no navegador</h3>
+                    <p>Clique no botão abaixo para baixar o PDF:</p>
+                    <button 
+                      onClick={() => handleDownload(selectedOS)} 
+                      className="btn-download-pdf"
+                    >
+                      📥 Baixar PDF
+                    </button>
                   </div>
-                ))}
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="modal-body">
+                <div className="os-detail">
+                  <p><strong>Cliente:</strong> {selectedOS.clientName}</p>
+                  <p><strong>Prazo:</strong> {selectedOS.deadline}</p>
+                  <p><strong>Pagamento:</strong> {selectedOS.payment}</p>
+                  <p><strong>Desconto:</strong> R$ {parseFloat(selectedOS.discount || 0).toFixed(2)}</p>
+                  <p><strong>Data:</strong> {new Date(selectedOS.createdAt).toLocaleString('pt-BR')}</p>
+                </div>
+                <div className="os-items">
+                  <h3>Itens</h3>
+                  {(typeof selectedOS.items === 'string' ? JSON.parse(selectedOS.items) : selectedOS.items || []).map((item, index) => (
+                    <div key={index} className="item-detail">
+                      <p><strong>{item.description}</strong></p>
+                      <p>{item.quantity} x R$ {parseFloat(item.unitValue).toFixed(2)} = R$ {parseFloat(item.total).toFixed(2)}</p>
+                    </div>
+                  ))}
+                </div>
+                
+                {/* Exibir imagens se existirem */}
+                {selectedOS.images && selectedOS.images.length > 0 && (
+                  <div className="os-images">
+                    <h3>Imagens</h3>
+                    <div className="images-grid">
+                      {(typeof selectedOS.images === 'string' ? JSON.parse(selectedOS.images) : selectedOS.images).map((imageName, index) => (
+                        <div key={index} className="image-item">
+                          <img 
+                            src={`http://localhost:3000/uploads/${imageName}`}
+                            alt={`Imagem ${index + 1}`}
+                            className="os-image"
+                            onError={(e) => {
+                              e.target.style.display = 'none';
+                              e.target.nextSibling.style.display = 'block';
+                            }}
+                          />
+                          <div className="image-error" style={{ display: 'none' }}>
+                            📷 {imageName}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            
             <div className="modal-footer">
               <button onClick={closeModal} className="btn-close-modal">
                 Fechar

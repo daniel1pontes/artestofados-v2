@@ -49,10 +49,9 @@ function GerarOS() {
 
   const handleImageChange = (e) => {
     const files = Array.from(e.target.files);
-    // In a real implementation, you would upload these to the server
     setFormData(prev => ({
       ...prev,
-      images: [...prev.images, ...files.map(f => f.name)]
+      images: [...prev.images, ...files]
     }));
   };
 
@@ -62,15 +61,38 @@ function GerarOS() {
     setSuccess(false);
 
     try {
-      const response = await osAPI.criar(formData);
-      console.log('OS created:', response);
+      // Create FormData for file upload
+      const formDataToSend = new FormData();
+      formDataToSend.append('clientName', formData.clientName);
+      formDataToSend.append('deadline', formData.deadline);
+      formDataToSend.append('payment', formData.payment);
+      formDataToSend.append('items', JSON.stringify(formData.items));
+      formDataToSend.append('discount', formData.discount || 0);
+      
+      // Add images
+      formData.images.forEach((image, index) => {
+        formDataToSend.append('images', image);
+      });
+
+      const response = await fetch('http://localhost:3000/os/criar', {
+        method: 'POST',
+        body: formDataToSend,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Erro ao criar OS');
+      }
+
+      const result = await response.json();
+      console.log('OS created:', result);
       setSuccess(true);
       setTimeout(() => {
         resetForm();
       }, 3000);
     } catch (error) {
       console.error('Error creating OS:', error);
-      alert('Erro ao criar OS: ' + (error.response?.data?.error || error.message));
+      alert('Erro ao criar OS: ' + error.message);
     } finally {
       setLoading(false);
     }
@@ -103,7 +125,7 @@ function GerarOS() {
           <h2>Informações do Cliente</h2>
           <div className="form-row">
             <div className="form-group">
-              <label>Nome do Cliente *</label>
+              <label>Nome do Cliente</label>
               <input
                 type="text"
                 name="clientName"
@@ -113,20 +135,19 @@ function GerarOS() {
               />
             </div>
             <div className="form-group">
-              <label>Prazo *</label>
+              <label>Prazo de Entrega</label>
               <input
-                type="text"
+                type="date"
                 name="deadline"
                 value={formData.deadline}
                 onChange={handleChange}
-                placeholder="Ex: 30 dias"
                 required
               />
             </div>
           </div>
           <div className="form-row">
             <div className="form-group">
-              <label>Forma de Pagamento *</label>
+              <label>Forma de Pagamento</label>
               <input
                 type="text"
                 name="payment"
@@ -228,7 +249,7 @@ function GerarOS() {
             <div className="image-list">
               {formData.images.map((img, index) => (
                 <div key={index} className="image-item">
-                  📷 {img}
+                  📷 {img.name || img}
                 </div>
               ))}
             </div>

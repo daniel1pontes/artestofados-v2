@@ -11,7 +11,21 @@ function Sidebar({ activeTab, setActiveTab }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
-        <h1>OS Management</h1>
+        <div className="logo-container">
+          <img 
+            src="/icon.png" 
+            alt="Logo da Empresa" 
+            className="company-logo"
+            onError={(e) => {
+              e.target.style.display = 'none';
+              e.target.nextSibling.style.display = 'block';
+            }}
+          />
+          <div className="logo-placeholder" style={{ display: 'none' }}>
+            🏢
+          </div>
+        </div>
+        <h1>Sistema Artestofados</h1>
       </div>
       <nav className="sidebar-nav">
         {tabs.map(tab => (

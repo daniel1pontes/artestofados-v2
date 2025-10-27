@@ -1,60 +1,112 @@
 const OrdemServico = require('../models/ordemServico');
 const pdfService = require('../services/pdf');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Configure multer for image uploads
+const uploadsDir = path.join(__dirname, '../../uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'os-image-' + uniqueSuffix + path.extname(file.originalname));
+  },
+});
+
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
+  },
+});
 
 const osController = {
   async criar(req, res) {
     try {
-      const { clientName, deadline, payment, items, discount, images } = req.body;
+      // Handle file uploads first
+      upload.array('images', 10)(req, res, async (err) => {
+        if (err) {
+          return res.status(400).json({ error: err.message });
+        }
 
-      // Validation
-      if (!clientName || !deadline || !payment || !items || items.length === 0) {
-        return res.status(400).json({ 
-          error: 'Missing required fields: clientName, deadline, payment, items' 
-        });
-      }
+        try {
+          const { clientName, deadline, payment, items, discount } = req.body;
+          const uploadedImages = req.files || [];
 
-      // Validate items structure
-      for (const item of items) {
-        if (!item.description || !item.quantity || !item.unitValue) {
-          return res.status(400).json({ 
-            error: 'Each item must have: description, quantity, unitValue' 
+          // Validation
+          if (!clientName || !deadline || !payment || !items || items.length === 0) {
+            return res.status(400).json({ 
+              error: 'Missing required fields: clientName, deadline, payment, items' 
+            });
+          }
+
+          // Validate items structure
+          const itemsArray = typeof items === 'string' ? JSON.parse(items) : items;
+          for (const item of itemsArray) {
+            if (!item.description || !item.quantity || !item.unitValue) {
+              return res.status(400).json({ 
+                error: 'Each item must have: description, quantity, unitValue' 
+              });
+            }
+            // Calculate total if not provided
+            if (!item.total) {
+              item.total = (parseFloat(item.quantity) * parseFloat(item.unitValue)).toFixed(2);
+            }
+          }
+
+          // Prepare image filenames
+          const imageFilenames = uploadedImages.map(file => file.filename);
+
+          // Create OS
+          const osData = await OrdemServico.create({
+            clientName,
+            deadline,
+            payment,
+            items: itemsArray,
+            discount: discount || 0,
+            images: imageFilenames,
           });
+
+          // Generate PDF with images
+          const pdf = await pdfService.generateOSPDF({
+            ...osData,
+            items: osData.items,
+            images: osData.images,
+          });
+
+          // Update OS with PDF path
+          await OrdemServico.update(osData.id, {
+            pdfPath: pdf.filename,
+          });
+
+          res.json({
+            message: 'OS created successfully',
+            os: osData,
+            pdf: {
+              filename: pdf.filename,
+              path: `/uploads/${pdf.filename}`,
+            },
+          });
+        } catch (error) {
+          console.error('Error creating OS:', error);
+          res.status(500).json({ error: 'Failed to create OS' });
         }
-        // Calculate total if not provided
-        if (!item.total) {
-          item.total = (parseFloat(item.quantity) * parseFloat(item.unitValue)).toFixed(2);
-        }
-      }
-
-      // Create OS
-      const osData = await OrdemServico.create({
-        clientName,
-        deadline,
-        payment,
-        items,
-        discount: discount || 0,
-        images: images || [],
-      });
-
-      // Generate PDF
-      const pdf = await pdfService.generateOSPDF({
-        ...osData,
-        items: osData.items,
-        images: osData.images,
-      });
-
-      // Update OS with PDF path
-      await OrdemServico.update(osData.id, {
-        pdfPath: pdf.filename,
-      });
-
-      res.json({
-        message: 'OS created successfully',
-        os: osData,
-        pdf: {
-          filename: pdf.filename,
-          path: `/uploads/${pdf.filename}`,
-        },
       });
     } catch (error) {
       console.error('Error creating OS:', error);

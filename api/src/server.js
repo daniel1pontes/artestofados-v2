@@ -24,7 +24,7 @@ const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'OS Management API',
+      title: 'Sistema Artestofados API',
       version: '1.0.0',
       description: 'API for Order Service management and Chatbot',
     },

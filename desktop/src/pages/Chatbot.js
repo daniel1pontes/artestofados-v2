@@ -1,46 +1,137 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { chatbotAPI } from '../services/api';
+import { QRCodeSVG } from 'qrcode.react'; // Componente React para QR Code
 import './Chatbot.css';
 
 function Chatbot() {
   const [status, setStatus] = useState(null);
-  const [qrCode, setQrCode] = useState('');
+  const [qrString, setQrString] = useState(''); // String do QR Code
   const [atendimentos, setAtendimentos] = useState([]);
   const [loading, setLoading] = useState(false);
-
-  const loadQRCode = async () => {
-    try {
-      const qrData = await chatbotAPI.getQRCode();
-      console.log('QR Data received:', qrData);
-      if (qrData.qrCode) {
-        setQrCode(qrData.qrCode);
-        console.log('QR Code set, length:', qrData.qrCode.length);
-      }
-    } catch (error) {
-      console.error('Error loading QR code:', error);
-    }
-  };
+  const [debugInfo, setDebugInfo] = useState('');
+  const pollIntervalRef = useRef(null);
+  const attemptCountRef = useRef(0);
 
   useEffect(() => {
     loadStatus();
     loadAtendimentos();
-    loadQRCode();
-    const interval = setInterval(() => {
-      loadStatus();
-      loadAtendimentos();
-      loadQRCode();
-    }, 2000); // Poll every 2 seconds for QR code updates
-    return () => clearInterval(interval);
+    
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
   }, []);
+
+  const startQRPolling = () => {
+    console.log('🔄 Starting QR polling...');
+    attemptCountRef.current = 0;
+    
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
+
+    loadQRCode();
+
+    pollIntervalRef.current = setInterval(async () => {
+      attemptCountRef.current += 1;
+      console.log(`🔄 QR polling attempt #${attemptCountRef.current}`);
+      
+      try {
+        const statusData = await chatbotAPI.getStatus();
+        setStatus(statusData);
+        setDebugInfo(`Tentativa ${attemptCountRef.current}: Status = ${statusData.status}`);
+
+        if (statusData.status === 'connected') {
+          console.log('✅ Connected! Stopping polling.');
+          setQrString('');
+          clearInterval(pollIntervalRef.current);
+          setDebugInfo('✅ Conectado com sucesso!');
+          await loadAtendimentos(); // Recarregar atendimentos após conexão
+          return;
+        }
+
+        const qrData = await chatbotAPI.getQRCode();
+        console.log('📱 QR response:', {
+          hasQRString: !!qrData.qrString,
+          length: qrData.qrString?.length || 0
+        });
+        
+        if (qrData.qrString) {
+          console.log('✅ QR String received!');
+          setQrString(qrData.qrString);
+          setDebugInfo(`✅ QR Code recebido! (${qrData.qrString.length} chars)`);
+        } else {
+          console.log('⏳ QR String not ready yet');
+          setDebugInfo(`Aguardando QR... Tentativa ${attemptCountRef.current}`);
+        }
+      } catch (error) {
+        console.error('❌ Error polling:', error);
+        setDebugInfo(`Erro: ${error.message}`);
+      }
+    }, 3000);
+
+    setTimeout(() => {
+      if (pollIntervalRef.current) {
+        console.log('⏹️ Stopping polling after 2 minutes');
+        clearInterval(pollIntervalRef.current);
+        if (!qrString) {
+          setDebugInfo('Timeout: QR Code não foi gerado após 2 minutos.');
+        }
+      }
+    }, 120000);
+  };
+
+  const loadQRCode = async () => {
+    try {
+      console.log('📲 Loading QR Code...');
+      const qrData = await chatbotAPI.getQRCode();
+      console.log('📱 QR Data received:', {
+        hasQRCode: !!qrData.qrCode,
+        hasQRString: !!qrData.qrString,
+        qrCodeLength: qrData.qrCode?.length || 0,
+        keys: Object.keys(qrData)
+      });
+      
+      // Backend retorna 'qrCode' agora
+      if (qrData.qrCode) {
+        console.log('✅ QR Code received (Base64)!');
+        setQrString(qrData.qrCode);
+        setDebugInfo(`✅ QR Code carregado! (${qrData.qrCode.length} chars)`);
+      } else if (qrData.qrString) {
+        // Fallback para qrString se existir
+        console.log('✅ QR String received!');
+        setQrString(qrData.qrString);
+        setDebugInfo(`✅ QR Code carregado! (${qrData.qrString.length} chars)`);
+      } else {
+        console.log('⏳ QR Code not available yet');
+        setDebugInfo('QR Code ainda não disponível');
+      }
+    } catch (error) {
+      console.error('❌ Error loading QR:', error);
+      setDebugInfo(`Erro ao carregar QR: ${error.message}`);
+    }
+  };
 
   const loadStatus = async () => {
     try {
       const statusData = await chatbotAPI.getStatus();
+      console.log('📊 Status loaded:', statusData);
       setStatus(statusData);
-      const qrData = await chatbotAPI.getQRCode();
-      if (qrData.qrCode) setQrCode(qrData.qrCode);
+      
+      if (statusData.status !== 'connected' && statusData.hasQRString) {
+        const qrData = await chatbotAPI.getQRCode();
+        if (qrData.qrString) {
+          setQrString(qrData.qrString);
+          setDebugInfo('QR Code já disponível');
+        }
+      } else if (statusData.status === 'connected') {
+        setQrString('');
+        setDebugInfo('Conectado ao WhatsApp');
+      }
     } catch (error) {
-      console.error('Error loading status:', error);
+      console.error('❌ Error loading status:', error);
+      setDebugInfo(`Erro ao carregar status: ${error.message}`);
     }
   };
 
@@ -49,29 +140,38 @@ function Chatbot() {
       const data = await chatbotAPI.getAtendimentos();
       setAtendimentos(data.atendimentos || []);
     } catch (error) {
-      console.error('Error loading atendimentos:', error);
+      console.error('❌ Error loading atendimentos:', error);
     }
   };
 
   const handleConectar = async () => {
     setLoading(true);
+    setQrString('');
+    setDebugInfo('Iniciando conexão...');
+    attemptCountRef.current = 0;
+    
     try {
-      await chatbotAPI.conectar();
-      // Start polling for QR code
-      const qrInterval = setInterval(async () => {
-        const qrData = await chatbotAPI.getQRCode();
-        if (qrData.qrCode) {
-          setQrCode(qrData.qrCode);
-        }
-      }, 1000);
+      console.log('🚀 Connecting to WhatsApp...');
+      const response = await chatbotAPI.conectar();
+      console.log('📡 Connect response:', response);
       
-      // Stop polling after 5 minutes
-      setTimeout(() => clearInterval(qrInterval), 300000);
+      setDebugInfo('Aguardando geração do QR String...');
+      
+      if (response.qrString) {
+        console.log('✅ QR String received in response!');
+        setQrString(response.qrString);
+        setDebugInfo('✅ QR Code recebido na resposta!');
+      }
+      
+      setTimeout(() => {
+        startQRPolling();
+      }, 1000);
       
       await loadStatus();
     } catch (error) {
-      console.error('Error connecting:', error);
+      console.error('❌ Error connecting:', error);
       alert('Erro ao conectar: ' + error.message);
+      setDebugInfo(`Erro: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -80,10 +180,15 @@ function Chatbot() {
   const handleDesconectar = async () => {
     setLoading(true);
     try {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
       await chatbotAPI.desconectar();
+      setQrString('');
+      setDebugInfo('Desconectado');
       await loadStatus();
     } catch (error) {
-      console.error('Error disconnecting:', error);
+      console.error('❌ Error disconnecting:', error);
       alert('Erro ao desconectar: ' + error.message);
     } finally {
       setLoading(false);
@@ -96,7 +201,7 @@ function Chatbot() {
       await chatbotAPI.pausar();
       await loadStatus();
     } catch (error) {
-      console.error('Error pausing:', error);
+      console.error('❌ Error pausing:', error);
       alert('Erro ao pausar: ' + error.message);
     } finally {
       setLoading(false);
@@ -109,27 +214,54 @@ function Chatbot() {
       await chatbotAPI.retomar();
       await loadStatus();
     } catch (error) {
-      console.error('Error resuming:', error);
+      console.error('❌ Error resuming:', error);
       alert('Erro ao retomar: ' + error.message);
     } finally {
       setLoading(false);
     }
   };
 
+  const handleManualRefresh = async () => {
+    console.log('🔄 Manual refresh requested');
+    setDebugInfo('Atualizando manualmente...');
+    await loadQRCode();
+    await loadStatus();
+  };
+
   const formatStatus = (statusObj) => {
     if (!statusObj) return 'Desconhecido';
     if (statusObj.paused) return `Pausado até ${new Date(statusObj.pausedUntil).toLocaleString('pt-BR')}`;
-    return statusObj.status;
+    
+    const statusMap = {
+      'disconnected': '🔴 Desconectado',
+      'qr_ready': '🟡 QR Code pronto para escanear',
+      'authenticated': '🟢 Autenticado',
+      'authenticating': '🟡 Autenticando',
+      'connected': '🟢 Conectado',
+      'auth_failure': '🔴 Falha na autenticação'
+    };
+    
+    return statusMap[statusObj.status] || statusObj.status;
   };
 
   return (
     <div className="chatbot-page">
-      <h1>💬 Chatbot</h1>
+      <h1>💬 Chatbot WhatsApp</h1>
 
       <div className="chatbot-controls">
         <div className="status-card">
           <h2>Status</h2>
           <p className="status-text">{formatStatus(status)}</p>
+          {status?.hasQRString && (
+            <p style={{ fontSize: '12px', color: '#10b981', marginTop: '4px', fontWeight: '600' }}>
+              ✅ QR Code disponível
+            </p>
+          )}
+          {debugInfo && (
+            <p style={{ fontSize: '11px', color: '#6b7280', marginTop: '8px', fontFamily: 'monospace' }}>
+              🔍 Debug: {debugInfo}
+            </p>
+          )}
         </div>
 
         <div className="control-buttons">
@@ -138,65 +270,180 @@ function Chatbot() {
             disabled={loading || status?.status === 'connected'}
             className="btn btn-primary"
           >
-            Conectar WhatsApp
+            {loading ? '⏳ Conectando...' : '📱 Conectar WhatsApp'}
           </button>
-          <button 
-            onClick={handleDesconectar} 
-            disabled={loading || status?.status !== 'connected'}
-            className="btn btn-secondary"
-          >
-            Desconectar
-          </button>
-          <button 
-            onClick={handlePausar} 
-            disabled={loading || status?.status !== 'connected' || status?.paused}
-            className="btn btn-warning"
-          >
-            Pausar Bot
-          </button>
-          <button 
-            onClick={handleRetomar} 
-            disabled={loading || !status?.paused}
-            className="btn btn-success"
-          >
-            Retomar Bot
-          </button>
+          {status?.status === 'connected' && (
+            <>
+              <button 
+                onClick={handleDesconectar} 
+                disabled={loading}
+                className="btn btn-secondary"
+              >
+                🔌 Desconectar
+              </button>
+              <button 
+                onClick={handlePausar} 
+                disabled={loading || status?.paused}
+                className="btn btn-warning"
+              >
+                ⏸️ Pausar Bot
+              </button>
+              <button 
+                onClick={handleRetomar} 
+                disabled={loading || !status?.paused}
+                className="btn btn-success"
+              >
+                ▶️ Retomar Bot
+              </button>
+            </>
+          )}
         </div>
 
-        {qrCode && status?.status !== 'connected' && (
-          <div className="qr-code-container">
+        {/* EXIBIR QR CODE COMO IMAGEM BASE64 */}
+        {qrString && status?.status !== 'connected' && (
+          <div className="qr-code-container" style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minHeight: '400px',
+            textAlign: 'center'
+          }}>
             <h3>Escaneie o QR Code com o WhatsApp</h3>
-            <div className="qr-code-wrapper">
-              <div dangerouslySetInnerHTML={{ __html: qrCode }} />
+            <div className="qr-code-wrapper" style={{ 
+              border: '3px solid #10b981',
+              padding: '20px',
+              borderRadius: '12px',
+              backgroundColor: '#ffffff',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              margin: '20px 0'
+            }}>
+              {/* IMAGEM BASE64 DO QR CODE */}
+              {qrString.startsWith('data:image') ? (
+                <img src={qrString} alt="QR Code" style={{ maxWidth: '300px', height: 'auto' }} />
+              ) : (
+                <QRCodeSVG 
+                  value={qrString}
+                  size={300}
+                  level="M"
+                  includeMargin={true}
+                  bgColor="#ffffff"
+                  fgColor="#000000"
+                />
+              )}
             </div>
-            <p className="qr-instruction">Abra o WhatsApp no celular → Menu → Dispositivos conectados → Conectar dispositivo</p>
+            <p className="qr-instruction" style={{ marginTop: '16px', fontSize: '14px' }}>
+              <strong>Como escanear:</strong><br/>
+              1. Abra o WhatsApp no celular<br/>
+              2. Menu (⋮) → Dispositivos conectados<br/>
+              3. Conectar dispositivo → Aponte para o QR Code acima
+            </p>
+            <button 
+              onClick={handleManualRefresh}
+              className="btn btn-secondary"
+              style={{ marginTop: '12px', padding: '8px 16px', fontSize: '13px' }}
+            >
+              🔄 Atualizar QR Code
+            </button>
+          </div>
+        )}
+
+        {!qrString && status?.status !== 'connected' && status?.status !== 'disconnected' && status?.status !== null && (
+          <div className="qr-code-container">
+            <div style={{ padding: '40px', textAlign: 'center' }}>
+              <div className="spinner" style={{ 
+                border: '4px solid #f3f3f3',
+                borderTop: '4px solid #007bff',
+                borderRadius: '50%',
+                width: '50px',
+                height: '50px',
+                animation: 'spin 1s linear infinite',
+                margin: '0 auto 20px'
+              }}></div>
+              <p className="qr-instruction" style={{ fontSize: '16px', marginBottom: '8px' }}>
+                ⏳ Aguardando QR String do backend...
+              </p>
+              <p style={{ fontSize: '13px', color: '#6b7280' }}>
+                Tentativa: {attemptCountRef.current}
+              </p>
+              <button 
+                onClick={handleManualRefresh}
+                className="btn btn-secondary"
+                style={{ marginTop: '16px', padding: '8px 16px', fontSize: '13px' }}
+              >
+                🔄 Tentar Buscar Agora
+              </button>
+            </div>
           </div>
         )}
       </div>
 
       <div className="atendimentos-section">
-        <h2>Atendimentos</h2>
+        <h2>📋 Atendimentos</h2>
+        <button 
+          onClick={loadAtendimentos}
+          className="btn btn-secondary"
+          style={{ marginBottom: '16px', padding: '8px 16px', fontSize: '13px' }}
+        >
+          🔄 Atualizar Atendimentos
+        </button>
         {atendimentos.length === 0 ? (
-          <p>Nenhum atendimento ainda</p>
+          <p style={{ color: '#6b7280' }}>Nenhum atendimento ainda</p>
         ) : (
           <div className="atendimentos-list">
             {atendimentos.map(atendimento => (
-              <div key={atendimento.id} className="atendimento-card">
-                <div className="atendimento-header">
-                  <span className="atendimento-phone">{atendimento.phoneNumber}</span>
-                  <span className="atendimento-state">{atendimento.state}</span>
+              <div key={atendimento.id} className="atendimento-card" style={{
+                border: '1px solid #e5e7eb',
+                borderRadius: '8px',
+                padding: '16px',
+                marginBottom: '12px',
+                backgroundColor: '#ffffff',
+                boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
+              }}>
+                <div className="atendimento-header" style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: '8px'
+                }}>
+                  <span className="atendimento-phone" style={{ fontWeight: '600', fontSize: '16px' }}>
+                    📞 {atendimento.phoneNumber}
+                  </span>
+                  <span className="atendimento-state" style={{
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                    fontWeight: '500',
+                    backgroundColor: atendimento.state === 'initial' ? '#fef3c7' : '#d1fae5',
+                    color: atendimento.state === 'initial' ? '#92400e' : '#065f46'
+                  }}>
+                    {atendimento.state}
+                  </span>
                 </div>
-                <div className="atendimento-meta">
-                  <small>{new Date(atendimento.createdAt).toLocaleString('pt-BR')}</small>
+                <div className="atendimento-meta" style={{ fontSize: '14px', color: '#6b7280' }}>
+                  <small>🕒 {new Date(atendimento.createdAt).toLocaleString('pt-BR')}</small>
+                  {atendimento.metadata && Object.keys(atendimento.metadata).length > 0 && (
+                    <div style={{ marginTop: '8px' }}>
+                      <strong>Dados:</strong> {JSON.stringify(atendimento.metadata, null, 2)}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      <style>{`
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
 
 export default Chatbot;
-

@@ -1,33 +1,99 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const QRCode = require('qrcode');
 const pool = require('../config/database');
+const fs = require('fs');
+const path = require('path');
+const { exec } = require('child_process');
 
 let client = null;
-let qrCode = '';
+let qrString = '';
 let status = 'disconnected';
 let pausedUntil = null;
-let pendingMessage = null;
+let initializationAttempt = 0;
+let chatPauses = new Map(); // Map to store chat-specific pauses
 
-function initializeWhatsApp() {
-  if (client) {
-    return client;
-  }
-
-  // Clean up SingletonLock if it exists
-  const fs = require('fs');
-  const path = require('path');
+// LIMPAR COMPLETAMENTE A SESSÃO E LOCKS
+function cleanupSession() {
+  console.log('🧹 Cleaning up session and locks...');
+  
   try {
+    // Remover SingletonLock
     const lockFile = path.join(__dirname, '../../whatsapp-session/session/SingletonLock');
     if (fs.existsSync(lockFile)) {
       fs.unlinkSync(lockFile);
-      console.log('Cleaned up SingletonLock');
+      console.log('✅ Removed SingletonLock');
     }
+    
+    // Remover outros arquivos de lock
+    const lockPatterns = [
+      'SingletonCookie',
+      'SingletonSocket',
+      'Singleton',
+    ];
+    
+    const sessionDir = path.join(__dirname, '../../whatsapp-session/session');
+    if (fs.existsSync(sessionDir)) {
+      const files = fs.readdirSync(sessionDir);
+      files.forEach(file => {
+        if (lockPatterns.some(pattern => file.includes(pattern))) {
+          const filePath = path.join(sessionDir, file);
+          try {
+            fs.unlinkSync(filePath);
+            console.log(`✅ Removed ${file}`);
+          } catch (err) {
+            console.log(`⚠️ Could not remove ${file}:`, err.message);
+          }
+        }
+      });
+    }
+    
+    console.log('✅ Session cleanup complete');
   } catch (err) {
-    console.log('No lock file to clean');
+    console.log('⚠️ Cleanup error (non-critical):', err.message);
+  }
+}
+
+// MATAR PROCESSOS ANTIGOS DO CHROME
+function killOldChromeProcesses() {
+  return new Promise((resolve) => {
+    console.log('🔪 Checking for old Chrome processes...');
+    
+    exec('pkill -9 chrome', (error, stdout, stderr) => {
+      if (error) {
+        console.log('ℹ️ No old Chrome processes found (or pkill not available)');
+      } else {
+        console.log('✅ Killed old Chrome processes');
+      }
+      resolve();
+    });
+  });
+}
+
+async function initializeWhatsApp(forceNew = false) {
+  if (client && !forceNew) {
+    console.log('⚠️ Client already exists');
+    if (client.pupBrowser) {
+      console.log('ℹ️ Browser is still running, returning existing client');
+      return client;
+    } else {
+      console.log('⚠️ Client exists but browser died, will create new one');
+      client = null;
+    }
   }
 
-  // Use installed Chromium in Docker, or default for local development
-  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+  initializationAttempt++;
+  console.log(`\n${'='.repeat(80)}`);
+  console.log(`🚀 Initializing WhatsApp client (Attempt #${initializationAttempt})...`);
+  console.log('='.repeat(80));
+
+  // LIMPEZA COMPLETA ANTES DE INICIAR
+  await killOldChromeProcesses();
+  cleanupSession();
+  
+  // Aguardar um pouco para garantir que processos foram mortos
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser';
+  console.log('🔧 Puppeteer executable path:', executablePath);
 
   client = new Client({
     authStrategy: new LocalAuth({
@@ -52,53 +118,107 @@ function initializeWhatsApp() {
         '--safebrowsing-disable-auto-update',
         '--ignore-certificate-errors',
         '--ignore-ssl-errors',
-        '--ignore-certificate-errors-spki-list',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-web-security',
+        '--user-data-dir=/tmp/puppeteer-user-data-' + Math.random().toString(36),
+        '--disable-software-rasterizer',
+        '--disable-extensions-file-access-check',
+        '--disable-extensions-http-throttling',
       ],
       ignoreHTTPSErrors: true,
+      timeout: 60000,
     },
   });
 
+  // Evento QR Code
   client.on('qr', async (qr) => {
-    // Generate QR code as HTML
-    try {
-      qrCode = await QRCode.toString(qr, { 
-        type: 'svg',
-        errorCorrectionLevel: 'L'
-      });
-      console.log('QR Code generated as HTML');
-    } catch (err) {
-      console.error('Error generating QR code:', err);
-      qrCode = qr;
+    // Não gerar QR code se já estiver conectado
+    if (status === 'connected') {
+      console.log('⚠️ QR code event received but already connected, ignoring');
+      return;
     }
+    
+    console.log('\n' + '='.repeat(80));
+    console.log('🎯 QR CODE EVENT TRIGGERED!');
+    console.log('='.repeat(80));
+    
+    try {
+      const QRCode = require('qrcode');
+      
+      // Converter para PNG em Base64 para enviar ao frontend
+      const qrBase64 = await QRCode.toDataURL(qr, {
+        width: 300,
+        margin: 2,
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF'
+        }
+      });
+      
+      qrString = qrBase64; // Agora qrString contém a imagem Base64
+      status = 'qr_ready';
+      
+      console.log('✅ QR Code converted to Base64 PNG');
+      console.log('📏 Base64 length:', qrBase64.length);
+      console.log('='.repeat(80));
+      
+      // QR Code no terminal (backup)
+      try {
+        const qrcodeTerminal = require('qrcode-terminal');
+        console.log('\n📱 QR CODE NO TERMINAL:\n');
+        qrcodeTerminal.generate(qr, { small: true });
+        console.log('\n');
+      } catch (err) {
+        console.log('⚠️ qrcode-terminal not available');
+      }
+    } catch (err) {
+      console.error('❌ Error converting QR to Base64:', err);
+      qrString = qr; // Fallback para string
+      status = 'qr_ready';
+    }
+  });
+
+  client.on('loading_screen', (percent, message) => {
+    console.log(`📱 Loading: ${percent}% - ${message}`);
   });
 
   client.on('ready', () => {
     status = 'connected';
-    console.log('WhatsApp client is ready!');
+    qrString = '';
+    initializationAttempt = 0;
+    console.log('\n' + '='.repeat(80));
+    console.log('✅ WhatsApp client CONNECTED and READY!');
+    console.log('='.repeat(80) + '\n');
   });
 
   client.on('authenticated', () => {
-    status = 'authenticating';
-    console.log('Authenticated');
+    status = 'authenticated';
+    console.log('🔐 Authentication successful');
   });
 
   client.on('auth_failure', (msg) => {
     status = 'auth_failure';
-    console.error('Authentication failed:', msg);
+    qrString = '';
+    console.error('❌ Authentication failed:', msg);
+    console.log('💡 Tip: Delete whatsapp-session folder and try again');
   });
 
   client.on('disconnected', (reason) => {
     status = 'disconnected';
-    console.log('Client was disconnected:', reason);
+    qrString = '';
+    console.log('🔌 Client disconnected:', reason);
+    
+     // Limpar após desconexão
+     cleanupSession();
+     client = null;
   });
 
   client.on('message', async (msg) => {
     await handleIncomingMessage(msg);
   });
 
+  console.log('⏳ Client created, waiting for initialization...');
   return client;
 }
 
@@ -107,19 +227,16 @@ async function handleIncomingMessage(msg) {
     const contact = await msg.getContact();
     const fromNumber = contact.id.user;
     
-    // Check if message is from an employee (you may need to configure employee numbers)
     const isEmployee = await checkIfEmployee(fromNumber);
     
     if (isEmployee && status === 'connected') {
-      // Pause bot for 2 hours when employee sends message
-      pauseBot(2);
+      // Pause only this specific chat for 2 hours when employee sends message
+      pauseChat(fromNumber, 2);
     }
 
-    // Save message to database
     await saveMessage(msg.id._serialized, fromNumber, msg.body, msg.timestamp);
 
-    // Process chatbot logic (if not paused)
-    if (status === 'connected' && !isPaused()) {
+    if (status === 'connected' && !isPaused(fromNumber)) {
       await processChatbotMessage(msg);
     }
   } catch (error) {
@@ -128,7 +245,6 @@ async function handleIncomingMessage(msg) {
 }
 
 async function checkIfEmployee(number) {
-  // Implement your logic to check if number belongs to employee
   const employees = process.env.EMPLOYEE_NUMBERS?.split(',') || [];
   return employees.includes(number);
 }
@@ -152,15 +268,12 @@ async function processChatbotMessage(msg) {
     const fromNumber = contact.id.user;
     const sessionId = await getOrCreateSession(fromNumber);
     
-    // Get or create conversation state
     const state = await getConversationState(sessionId);
-    
-    // Process based on state
     const response = await generateChatbotResponse(msg.body, state);
     
     if (response) {
-      await sendMessage(fromNumber, response);
-      await updateConversationState(sessionId, response);
+      await sendMessage(fromNumber, response.response);
+      await updateConversationState(sessionId, response.nextState, response.metadata);
     }
   } catch (error) {
     console.error('Error processing chatbot message:', error);
@@ -229,21 +342,21 @@ async function generateChatbotResponse(message, stateObj) {
   const openai = require('../config/openai');
   const { state, metadata } = stateObj;
 
-  const systemPrompt = `You are a helpful assistant for a furniture company. Your role is to:
-1. Welcome customers warmly
-2. Classify their request as either "Fabricação" (Manufacturing) or "Reforma" (Reform)
-3. Guide them through the process
+  const systemPrompt = `Você é um assistente útil para uma empresa de estofados. Seu papel é:
+1. Receber os clientes getilmente
+2. Classificar a solicitação como "Fabricação" ou "Reforma"
+3. colher informações do cliente, resumo do problema, etc.
+4. Orientá-los através do processo
 
-For Reform: Request photos and inform that the team will respond
-For Manufacturing: Suggest a 1-hour meeting or site visit
+Para Reforma: Solicitar fotos e informar que a equipe responderá
+Para Fabricação: Sugerir uma reunião de 1 hora ou visita ao local
 
-Keep responses concise and professional.`;
+Mantenha as respostas concisas e profissionais em português brasileiro.`;
 
   const conversation = [
     { role: 'system', content: systemPrompt },
   ];
 
-  // Add conversation history from metadata
   if (metadata.history) {
     conversation.push(...metadata.history);
   }
@@ -259,14 +372,12 @@ Keep responses concise and professional.`;
 
     const response = completion.choices[0].message.content;
 
-    // Update metadata with conversation history
     if (!metadata.history) metadata.history = [];
     metadata.history.push(
       { role: 'user', content: message },
       { role: 'assistant', content: response }
     );
 
-    // Determine next state based on response
     let nextState = state;
     if (state === 'initial') {
       nextState = 'classified';
@@ -304,54 +415,116 @@ async function sendMessage(phoneNumber, response) {
 
 function pauseBot(hours = 2) {
   pausedUntil = new Date(Date.now() + hours * 60 * 60 * 1000);
-  console.log(`Bot paused until ${pausedUntil}`);
+  console.log(`⏸️ Bot paused globally until ${pausedUntil}`);
+}
+
+function pauseChat(phoneNumber, hours = 2) {
+  const pauseUntil = new Date(Date.now() + hours * 60 * 60 * 1000);
+  chatPauses.set(phoneNumber, pauseUntil);
+  console.log(`⏸️ Chat ${phoneNumber} paused until ${pauseUntil}`);
 }
 
 function resumeBot() {
   pausedUntil = null;
-  console.log('Bot resumed');
+  console.log('▶️ Bot resumed');
 }
 
-function isPaused() {
-  if (!pausedUntil) return false;
-  
-  if (Date.now() > pausedUntil.getTime()) {
-    pausedUntil = null;
-    return false;
+function isPaused(phoneNumber = null) {
+  // Check global pause first
+  if (pausedUntil) {
+    if (Date.now() > pausedUntil.getTime()) {
+      pausedUntil = null;
+    } else {
+      return true;
+    }
   }
 
-  return true;
+  // Check chat-specific pause if phoneNumber is provided
+  if (phoneNumber && chatPauses.has(phoneNumber)) {
+    const chatPauseUntil = chatPauses.get(phoneNumber);
+    if (Date.now() > chatPauseUntil.getTime()) {
+      chatPauses.delete(phoneNumber);
+    } else {
+      return true;
+    }
+  }
+
+  return false;
 }
 
-function getQRCode() {
-  return qrCode;
+function getQRString() {
+  console.log('📲 QR String requested:', {
+    hasQRString: !!qrString,
+    qrLength: qrString?.length || 0,
+    status: status
+  });
+  
+  return qrString;
 }
 
 function getStatus() {
-  return {
+  const statusInfo = {
     status,
     paused: isPaused(),
     pausedUntil: pausedUntil?.toISOString(),
+    hasQRString: !!qrString,
+    qrStringLength: qrString?.length || 0,
+    clientExists: !!client,
+    initializationAttempt,
+    chatPauses: Object.fromEntries(chatPauses)
   };
+  
+  console.log('📊 Status requested:', statusInfo);
+  return statusInfo;
 }
 
 module.exports = {
   initializeWhatsApp,
   connect: async () => {
-    const cli = initializeWhatsApp();
-    await cli.initialize();
+    console.log('🔌 Connect called');
+    
+    try {
+      const cli = await initializeWhatsApp(false);
+      console.log('⏳ Initializing WhatsApp client...');
+      await cli.initialize();
+      console.log('✅ Client initialized successfully');
+    } catch (error) {
+      console.error('❌ Error during connection:', error.message);
+      
+      // Se falhar, tentar novamente com força
+      if (initializationAttempt < 3) {
+        console.log('🔄 Retrying with cleanup...');
+        await killOldChromeProcesses();
+        cleanupSession();
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        const cli = await initializeWhatsApp(true);
+        await cli.initialize();
+      } else {
+        throw new Error('Failed after multiple attempts. Please delete whatsapp-session folder manually.');
+      }
+    }
   },
   disconnect: async () => {
+    console.log('🔌 Disconnect called');
     if (client) {
-      await client.destroy();
+      try {
+        await client.destroy();
+      } catch (err) {
+        console.log('⚠️ Error destroying client:', err.message);
+      }
       client = null;
       status = 'disconnected';
+      qrString = '';
+      cleanupSession();
+      console.log('✅ Client destroyed and cleaned up');
     }
   },
   pauseBot,
+  pauseChat,
   resumeBot,
-  getQRCode,
+  getQRString,
   getStatus,
   sendMessage,
+  cleanupSession, // Exportar para uso manual se necessário
 };
-
