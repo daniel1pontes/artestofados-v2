@@ -123,43 +123,16 @@ async function initializeWhatsApp(forceNew = false) {
   });
 
   client.on('qr', async (qr) => {
-    if (status === 'connected') {
-      console.log('⚠️ QR code event received but already connected, ignoring');
-      return;
-    }
-    
-    console.log('\n' + '='.repeat(80));
-    console.log('🎯 QR CODE EVENT TRIGGERED!');
-    console.log('='.repeat(80));
-    
+    if (status === 'connected') return;
+
     try {
       const QRCode = require('qrcode');
-      const qrBase64 = await QRCode.toDataURL(qr, {
-        width: 300,
-        margin: 2,
-        color: {
-          dark: '#000000',
-          light: '#FFFFFF'
-        }
-      });
-      
+      const qrBase64 = await QRCode.toDataURL(qr, { width: 300, margin: 2 });
       qrString = qrBase64;
       status = 'qr_ready';
-      
-      console.log('✅ QR Code converted to Base64 PNG');
-      console.log('📏 Base64 length:', qrBase64.length);
-      console.log('='.repeat(80));
-      
-      try {
-        const qrcodeTerminal = require('qrcode-terminal');
-        console.log('\n📱 QR CODE NO TERMINAL:\n');
-        qrcodeTerminal.generate(qr, { small: true });
-        console.log('\n');
-      } catch (err) {
-        console.log('⚠️ qrcode-terminal not available');
-      }
-    } catch (err) {
-      console.error('❌ Error converting QR to Base64:', err);
+      const qrcodeTerminal = require('qrcode-terminal');
+      qrcodeTerminal.generate(qr, { small: true });
+    } catch {
       qrString = qr;
       status = 'qr_ready';
     }
@@ -173,9 +146,7 @@ async function initializeWhatsApp(forceNew = false) {
     status = 'connected';
     qrString = '';
     initializationAttempt = 0;
-    console.log('\n' + '='.repeat(80));
     console.log('✅ WhatsApp client CONNECTED and READY!');
-    console.log('='.repeat(80) + '\n');
   });
 
   client.on('authenticated', () => {
@@ -187,15 +158,14 @@ async function initializeWhatsApp(forceNew = false) {
     status = 'auth_failure';
     qrString = '';
     console.error('❌ Authentication failed:', msg);
-    console.log('💡 Tip: Delete whatsapp-session folder and try again');
   });
 
   client.on('disconnected', (reason) => {
     status = 'disconnected';
     qrString = '';
-    console.log('🔌 Client disconnected:', reason);
     cleanupSession();
     client = null;
+    console.log('🔌 Client disconnected:', reason);
   });
 
   client.on('message', async (msg) => {
@@ -208,91 +178,41 @@ async function initializeWhatsApp(forceNew = false) {
 
 async function handleIncomingMessage(msg) {
   try {
-    console.log('\n' + '='.repeat(80));
-    console.log('📩 NEW MESSAGE RECEIVED');
-    console.log('='.repeat(80));
-    
     const contact = await msg.getContact();
     const fromNumber = contact.id.user;
-    
-    console.log('📞 From:', fromNumber);
-    console.log('💬 Message:', msg.body);
-    console.log('🆔 Message ID:', msg.id._serialized);
-    
-    // Verificar se é funcionário
+
     const isEmployee = await checkIfEmployee(fromNumber);
-    console.log('👤 Is Employee:', isEmployee);
-    
-    // NOVA LÓGICA: Se for funcionário, pausar o chat do CLIENTE que ele está respondendo
+
     if (isEmployee && status === 'connected') {
-      console.log('🔍 Employee sent message - checking if replying to a client...');
-      
-      // Tentar obter o chat para ver se é resposta
       try {
         const chat = await msg.getChat();
-        
-        // Se for um chat individual (não grupo)
         if (!chat.isGroup) {
-          // Se o funcionário está respondendo em um chat com cliente
-          // O "from" é o funcionário, mas o chat é com o cliente
-          console.log('💼 Employee replying to client - pausing bot for this chat');
-          console.log(`⏸️ Pausing chat with ${fromNumber} for 2 hours`);
-          
-          // IMPORTANTE: Pausar o chat com o CLIENTE (o número que recebeu a resposta)
-          // Como o funcionário enviou a mensagem, precisamos identificar o cliente
-          // Mas como funcionário está enviando DE seu número, na verdade queremos
-          // pausar quando ele RESPONDE em um chat de cliente
-          
-          // Vamos adicionar metadado na sessão para indicar atendimento humano
           await markChatAsHumanHandled(fromNumber);
           pauseChat(fromNumber, 2);
         }
-      } catch (chatError) {
-        console.log('⚠️ Could not get chat info:', chatError.message);
-      }
+      } catch {}
     }
 
-    // Salvar mensagem
     await saveMessage(msg.id._serialized, fromNumber, msg.body, msg.timestamp);
-    console.log('💾 Message saved to database');
 
-    // Verificar se está pausado
     const chatPaused = isPaused(fromNumber);
-    console.log('⏸️ Chat paused:', chatPaused);
-    console.log('🔗 Client status:', status);
-    
-    // NOVA LÓGICA: Não processar se for funcionário OU se chat estiver pausado
-    if (isEmployee) {
-      console.log('⏭️ Skipping - message from employee');
-    } else if (chatPaused) {
-      console.log('⏭️ Skipping - chat is paused (human is handling)');
-    } else if (status === 'connected') {
-      console.log('✅ Processing message with chatbot...');
+
+    if (!isEmployee && !chatPaused && status === 'connected') {
       await processChatbotMessage(msg);
-    } else {
-      console.log('⏭️ Skipping - client not connected');
     }
-    
-    console.log('='.repeat(80) + '\n');
+
   } catch (error) {
     console.error('❌ ERROR in handleIncomingMessage:', error);
-    console.error('Stack trace:', error.stack);
   }
 }
 
 async function checkIfEmployee(number) {
   const employees = process.env.EMPLOYEE_NUMBERS?.split(',').map(n => n.trim()) || [];
-  const isEmployee = employees.includes(number);
-  console.log('👥 Employee numbers configured:', employees);
-  console.log('🔍 Checking number:', number, '- Result:', isEmployee);
-  return isEmployee;
+  return employees.includes(number);
 }
 
 async function markChatAsHumanHandled(phoneNumber) {
   try {
-    console.log(`📝 Marking chat ${phoneNumber} as human-handled`);
-    
-    // Buscar sessão existente
     const result = await pool.query(
       `SELECT id, metadata FROM sessions WHERE phone_number = $1`,
       [phoneNumber]
@@ -301,8 +221,6 @@ async function markChatAsHumanHandled(phoneNumber) {
     if (result.rows.length > 0) {
       const session = result.rows[0];
       const metadata = session.metadata || {};
-      
-      // Adicionar flag de atendimento humano
       metadata.humanHandled = true;
       metadata.humanHandledAt = new Date().toISOString();
       
@@ -310,8 +228,6 @@ async function markChatAsHumanHandled(phoneNumber) {
         `UPDATE sessions SET metadata = $1, updated_at = NOW() WHERE id = $2`,
         [JSON.stringify(metadata), session.id]
       );
-      
-      console.log('✅ Chat marked as human-handled');
     }
   } catch (error) {
     console.error('❌ Error marking chat as human-handled:', error);
@@ -333,47 +249,24 @@ async function saveMessage(messageId, fromNumber, body, timestamp) {
 
 async function processChatbotMessage(msg) {
   try {
-    console.log('🤖 Starting chatbot processing...');
-    
     const contact = await msg.getContact();
     const fromNumber = contact.id.user;
-    
-    console.log('📋 Getting or creating session...');
+
     const sessionId = await getOrCreateSession(fromNumber);
-    console.log('✅ Session ID:', sessionId);
-    
-    console.log('📊 Getting conversation state...');
     const state = await getConversationState(sessionId);
-    console.log('✅ Current state:', JSON.stringify(state));
-    
-    console.log('🧠 Generating chatbot response...');
     const response = await generateChatbotResponse(msg.body, state);
-    
+
     if (response) {
-      console.log('✅ Response generated:', response.response.substring(0, 100) + '...');
-      console.log('📤 Sending message...');
-      
       await sendMessage(fromNumber, response.response);
-      console.log('✅ Message sent successfully!');
-      
-      console.log('💾 Updating conversation state...');
       await updateConversationState(sessionId, response.nextState, response.metadata);
-      console.log('✅ State updated to:', response.nextState);
-    } else {
-      console.log('⚠️ No response generated from chatbot');
     }
   } catch (error) {
     console.error('❌ ERROR in processChatbotMessage:', error);
-    console.error('Stack trace:', error.stack);
-    
-    // Tentar enviar mensagem de erro ao usuário
     try {
       const contact = await msg.getContact();
       const fromNumber = contact.id.user;
-      await sendMessage(fromNumber, 'Desculpe, estou tendo problemas técnicos no momento. Um atendente humano entrará em contato em breve. 🙏');
-    } catch (sendError) {
-      console.error('❌ Could not send error message to user:', sendError);
-    }
+      await sendMessage(fromNumber, 'Desculpe, estou com problemas técnicos no momento. Um atendente entrará em contato em breve. 🙏');
+    } catch {}
   }
 }
 
@@ -384,9 +277,7 @@ async function getOrCreateSession(phoneNumber) {
       [phoneNumber]
     );
 
-    if (result.rows.length > 0) {
-      return result.rows[0].id;
-    }
+    if (result.rows.length > 0) return result.rows[0].id;
 
     const insertResult = await pool.query(
       `INSERT INTO sessions (phone_number, state, created_at)
@@ -397,7 +288,6 @@ async function getOrCreateSession(phoneNumber) {
 
     return insertResult.rows[0].id;
   } catch (error) {
-    console.error('❌ Error getting/creating session:', error);
     throw error;
   }
 }
@@ -410,15 +300,10 @@ async function getConversationState(sessionId) {
     );
 
     if (result.rows.length > 0) {
-      return {
-        state: result.rows[0].state,
-        metadata: result.rows[0].metadata || {},
-      };
+      return { state: result.rows[0].state, metadata: result.rows[0].metadata || {} };
     }
-
     return { state: 'initial', metadata: {} };
-  } catch (error) {
-    console.error('❌ Error getting conversation state:', error);
+  } catch {
     return { state: 'initial', metadata: {} };
   }
 }
@@ -439,168 +324,69 @@ async function generateChatbotResponse(message, stateObj) {
   const openai = require('../config/openai');
   const { state, metadata } = stateObj;
 
-  console.log('🔑 Checking OpenAI API Key...');
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('❌ OPENAI_API_KEY not configured in .env file!');
-    throw new Error('OpenAI API Key not configured');
-  }
-  console.log('✅ OpenAI API Key configured');
+  const systemPrompt = `Você é um assistente útil para uma empresa de estofados. 
+1. Receba o cliente com cordialidade.
+2. Classifique como "Fabricação" ou "Reforma".
+3. Para Reforma: Solicite fotos e informe que a equipe entrará em contato.
+4. Para Fabricação: Sugira reunião de 1 hora ou visita ao local.
+Mantenha respostas curtas, claras e profissionais em português.`;
 
-  const systemPrompt = `Você é um assistente útil para uma empresa de estofados. Seu papel é:
-1. Receber os clientes gentilmente
-2. Classificar a solicitação como "Fabricação" ou "Reforma"
-3. Colher informações do cliente, resumo do problema, etc.
-4. Orientá-los através do processo
-
-Para Reforma: Solicitar fotos e informar que a equipe responderá
-Para Fabricação: Sugerir uma reunião de 1 hora ou visita ao local
-
-Mantenha as respostas concisas e profissionais em português brasileiro.`;
-
-  const conversation = [
-    { role: 'system', content: systemPrompt },
-  ];
-
-  if (metadata.history) {
-    conversation.push(...metadata.history);
-  }
-
+  const conversation = [{ role: 'system', content: systemPrompt }];
+  if (metadata.history) conversation.push(...metadata.history);
   conversation.push({ role: 'user', content: message });
 
   try {
-    console.log('🤖 Calling OpenAI API...');
-    console.log('📝 Conversation length:', conversation.length, 'messages');
-    
     const completion = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
+      model: 'gpt-4o-mini',
       messages: conversation,
       temperature: 0.7,
-      max_tokens: 1000,
-      servicetier: 'standard',
+      max_tokens: 800
     });
 
-    console.log('✅ OpenAI response received');
     const response = completion.choices[0].message.content;
-    console.log('💬 Response length:', response.length, 'chars');
 
     if (!metadata.history) metadata.history = [];
-    metadata.history.push(
-      { role: 'user', content: message },
-      { role: 'assistant', content: response }
-    );
+    metadata.history.push({ role: 'user', content: message }, { role: 'assistant', content: response });
 
     let nextState = state;
-    if (state === 'initial') {
-      nextState = 'classified';
-    } else if (state === 'classified') {
-      if (metadata.classification === 'Reforma') {
-        nextState = 'waiting_photos';
-      } else if (metadata.classification === 'Fabricação') {
-        nextState = 'scheduling';
-      }
+    if (state === 'initial') nextState = 'classified';
+    else if (state === 'classified') {
+      if (metadata.classification === 'Reforma') nextState = 'waiting_photos';
+      else if (metadata.classification === 'Fabricação') nextState = 'scheduling';
     }
 
     return { response, nextState, metadata };
   } catch (error) {
-    console.error('❌ ERROR calling OpenAI:', error);
-    console.error('Error details:', {
-      message: error.message,
-      code: error.code,
-      status: error.status,
-      type: error.type
-    });
-    
-    // Retornar resposta padrão em caso de erro
-    return {
-      response: 'Olá! Obrigado por entrar em contato. No momento estou com problemas técnicos, mas um de nossos atendentes responderá em breve. Por favor, descreva o que você precisa.',
-      nextState: state,
-      metadata
+    return { 
+      response: 'Olá! Estou com problemas técnicos, mas um atendente entrará em contato. Por favor, descreva sua solicitação.', 
+      nextState: state, 
+      metadata 
     };
   }
 }
 
 async function sendMessage(phoneNumber, response) {
-  if (!client || status !== 'connected') {
-    console.error('❌ Cannot send message - client not connected');
-    throw new Error('WhatsApp client not connected');
-  }
-
-  try {
-    const chatId = phoneNumber.includes('@c.us') 
-      ? phoneNumber 
-      : `${phoneNumber}@c.us`;
-    
-    console.log('📤 Sending to:', chatId);
-    console.log('💬 Message preview:', response.substring(0, 50) + '...');
-    
-    await client.sendMessage(chatId, response);
-    console.log('✅ Message sent successfully!');
-  } catch (error) {
-    console.error('❌ Error sending message:', error);
-    throw error;
-  }
+  if (!client || status !== 'connected') throw new Error('WhatsApp client not connected');
+  const chatId = phoneNumber.includes('@c.us') ? phoneNumber : `${phoneNumber}@c.us`;
+  await client.sendMessage(chatId, response);
 }
 
-function pauseBot(hours = 2) {
-  pausedUntil = new Date(Date.now() + hours * 60 * 60 * 1000);
-  console.log(`⏸️ Bot paused globally until ${pausedUntil}`);
-}
-
-function pauseChat(phoneNumber, hours = 2) {
-  const pauseUntil = new Date(Date.now() + hours * 60 * 60 * 1000);
-  chatPauses.set(phoneNumber, pauseUntil);
-  console.log(`⏸️ Chat ${phoneNumber} paused until ${pauseUntil.toLocaleString('pt-BR')}`);
-}
-
-function resumeBot() {
-  pausedUntil = null;
-  console.log('▶️ Bot resumed globally');
-}
-
-function resumeChat(phoneNumber) {
-  if (chatPauses.has(phoneNumber)) {
-    chatPauses.delete(phoneNumber);
-    console.log(`▶️ Chat ${phoneNumber} resumed`);
-    return true;
-  }
-  return false;
-}
-
+function pauseBot(hours = 2) { pausedUntil = new Date(Date.now() + hours * 3600000); }
+function pauseChat(phoneNumber, hours = 2) { chatPauses.set(phoneNumber, new Date(Date.now() + hours * 3600000)); }
+function resumeBot() { pausedUntil = null; }
+function resumeChat(phoneNumber) { chatPauses.delete(phoneNumber); }
 function isPaused(phoneNumber = null) {
-  // Check global pause first
-  if (pausedUntil) {
-    if (Date.now() > pausedUntil.getTime()) {
-      pausedUntil = null;
-    } else {
-      return true;
-    }
-  }
-
-  // Check chat-specific pause if phoneNumber is provided
+  if (pausedUntil && Date.now() < pausedUntil.getTime()) return true;
   if (phoneNumber && chatPauses.has(phoneNumber)) {
-    const chatPauseUntil = chatPauses.get(phoneNumber);
-    if (Date.now() > chatPauseUntil.getTime()) {
-      chatPauses.delete(phoneNumber);
-    } else {
-      return true;
-    }
+    if (Date.now() < chatPauses.get(phoneNumber).getTime()) return true;
+    chatPauses.delete(phoneNumber);
   }
-
   return false;
 }
 
-function getQRString() {
-  console.log('📲 QR String requested:', {
-    hasQRString: !!qrString,
-    qrLength: qrString?.length || 0,
-    status: status
-  });
-  
-  return qrString;
-}
-
+function getQRString() { return qrString; }
 function getStatus() {
-  const statusInfo = {
+  return {
     status,
     paused: isPaused(),
     pausedUntil: pausedUntil?.toISOString(),
@@ -608,55 +394,35 @@ function getStatus() {
     qrStringLength: qrString?.length || 0,
     clientExists: !!client,
     initializationAttempt,
-    chatPauses: Array.from(chatPauses.entries()).map(([phone, pauseUntil]) => ({
-      phone,
-      pausedUntil: pauseUntil.toISOString()
-    }))
+    chatPauses: Array.from(chatPauses.entries()).map(([phone, pauseUntil]) => ({ phone, pausedUntil: pauseUntil.toISOString() }))
   };
-  
-  console.log('📊 Status requested:', statusInfo);
-  return statusInfo;
 }
 
 module.exports = {
   initializeWhatsApp,
   connect: async () => {
-    console.log('🔌 Connect called');
-    
     try {
       const cli = await initializeWhatsApp(false);
-      console.log('⏳ Initializing WhatsApp client...');
       await cli.initialize();
-      console.log('✅ Client initialized successfully');
     } catch (error) {
-      console.error('❌ Error during connection:', error.message);
-      
       if (initializationAttempt < 3) {
-        console.log('🔄 Retrying with cleanup...');
         await killOldChromeProcesses();
         cleanupSession();
         await new Promise(resolve => setTimeout(resolve, 3000));
-        
         const cli = await initializeWhatsApp(true);
         await cli.initialize();
       } else {
-        throw new Error('Failed after multiple attempts. Please delete whatsapp-session folder manually.');
+        throw new Error('Failed after multiple attempts. Delete whatsapp-session folder manually.');
       }
     }
   },
   disconnect: async () => {
-    console.log('🔌 Disconnect called');
     if (client) {
-      try {
-        await client.destroy();
-      } catch (err) {
-        console.log('⚠️ Error destroying client:', err.message);
-      }
+      try { await client.destroy(); } catch {}
       client = null;
       status = 'disconnected';
       qrString = '';
       cleanupSession();
-      console.log('✅ Client destroyed and cleaned up');
     }
   },
   pauseBot,
