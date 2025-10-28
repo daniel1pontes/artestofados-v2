@@ -2,156 +2,447 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 
-function generateOSPDF(osData) {
-  return new Promise((resolve, reject) => {
+class PDFService {
+  constructor() {
+    this.uploadsDir = path.join(__dirname, '../../uploads');
+    this.assetsDir = path.join(__dirname, '../../assets');
+    this.logoPath = path.join(this.assetsDir, 'logo.png');
+    this.ensureDirectories();
+  }
+
+  ensureDirectories() {
+    if (!fs.existsSync(this.uploadsDir)) {
+      fs.mkdirSync(this.uploadsDir, { recursive: true });
+    }
+    if (!fs.existsSync(this.assetsDir)) {
+      fs.mkdirSync(this.assetsDir, { recursive: true });
+    }
+  }
+
+  formatarData(data) {
+    if (!data) return '';
+    
+    // Se já está no formato DD/MM/YYYY, retorna como está
+    if (typeof data === 'string' && data.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+      return data;
+    }
+    
     try {
-      const doc = new PDFDocument({ margin: 50 });
-      const uploadsDir = path.join(__dirname, '../../uploads');
+      const dataObj = new Date(data);
       
-      if (!fs.existsSync(uploadsDir)) {
-        fs.mkdirSync(uploadsDir, { recursive: true });
+      if (isNaN(dataObj.getTime())) {
+        return data;
+      }
+      
+      const dia = String(dataObj.getDate()).padStart(2, '0');
+      const mes = String(dataObj.getMonth() + 1).padStart(2, '0');
+      const ano = dataObj.getFullYear();
+      
+      return `${dia}/${mes}/${ano}`;
+    } catch (error) {
+      console.error('Erro ao formatar data:', error);
+      return data;
+    }
+  }
+
+  formatarMoeda(valor) {
+    return parseFloat(valor).toLocaleString('pt-BR', {
+      style: 'currency',
+      currency: 'BRL'
+    });
+  }
+
+  adicionarCabecalho(doc) {
+    // Tentar adicionar logo, mas não quebrar se não existir
+    try {
+      if (fs.existsSync(this.logoPath)) {
+        doc.image(this.logoPath, 50, 40, { width: 100 });
+        console.log('✅ Logo carregada');
+      } else {
+        console.warn('⚠️ Logo não encontrada, continuando sem logo');
+      }
+    } catch (error) {
+      console.warn('⚠️ Erro ao carregar logo, continuando sem logo:', error.message);
+    }
+
+    // Cabeçalho da empresa
+    doc
+      .fontSize(16)
+      .font('Helvetica-Bold')
+      .fillColor('#000000')
+      .text('Artestofados', 170, 45)
+      .fontSize(10)
+      .font('Helvetica')
+      .text('AV: Almirante Barroso, 389, Centro – João Pessoa –PB', 170, 65)
+      .text('CNPJ: 08.621.718/0001-07', 170, 80);
+
+    // Título da OS
+    doc
+      .fontSize(18)
+      .font('Helvetica-Bold')
+      .text('ORDEM DE SERVIÇO', 50, 140, { align: 'center', width: 495 });
+
+    doc.moveDown(3);
+  }
+
+  adicionarTabelaItens(doc, dados) {
+    const margemEsq = 50;
+    const larguraTotal = 495;
+    const colunas = [
+      { header: 'QTD', width: 60 },
+      { header: 'DESCRIÇÃO', width: 175 },
+      { header: 'VALOR UNIT.', width: 85 },
+      { header: 'DESC. (%)', width: 75 },
+      { header: 'VALOR TOTAL', width: 100 },
+    ];
+
+    let currentY = doc.y;
+    const headerHeight = 25;
+
+    // ========== CABEÇALHO DA TABELA ==========
+    doc.rect(margemEsq, currentY, larguraTotal, headerHeight).stroke();
+
+    doc.fontSize(9).font('Helvetica-Bold').fillColor('#000000');
+    let posX = margemEsq;
+    
+    colunas.forEach((col, index) => {
+      // Desenhar linha vertical entre colunas
+      if (index > 0) {
+        doc.moveTo(posX, currentY).lineTo(posX, currentY + headerHeight).stroke();
+      }
+      
+      doc.text(col.header, posX + 3, currentY + 8, {
+        width: col.width - 6,
+        align: 'center'
+      });
+      posX += col.width;
+    });
+
+    currentY += headerHeight;
+    doc.font('Helvetica').fontSize(9);
+
+    // ========== LINHAS DOS ITENS ==========
+    dados.items.forEach(item => {
+      const valorBruto = parseFloat(item.quantity) * parseFloat(item.unitValue);
+      let valorFinal = valorBruto;
+      const descontoItem = item.discount && parseFloat(item.discount) > 0 ? parseFloat(item.discount) : 0;
+      
+      // Aplicar desconto do item se houver
+      if (descontoItem > 0) {
+        const valorDesconto = (valorBruto * descontoItem) / 100;
+        valorFinal = valorBruto - valorDesconto;
       }
 
-      const filename = `os_${osData.id || 'new'}_${Date.now()}.pdf`;
-      const filepath = path.join(uploadsDir, filename);
+      const alturaLinha = 25;
 
-      const stream = fs.createWriteStream(filepath);
-      doc.pipe(stream);
-
-      // Set up error handlers BEFORE creating content
-      doc.on('error', (err) => {
-        reject(err);
-      });
-
-      stream.on('error', (err) => {
-        reject(err);
-      });
-
-      stream.on('finish', () => {
-        resolve({ filename, filepath });
-      });
-
-      // Header
-      doc.fontSize(20).text('ORDEM DE SERVIÇO', { align: 'center' });
-      doc.moveDown();
-
-      // Client info
-      doc.fontSize(14);
-      doc.text(`Cliente: ${osData.clientName}`);
-      doc.text(`Data: ${new Date(osData.createdAt).toLocaleDateString('pt-BR')}`);
-      
-      // Format deadline date
-      let deadlineText = osData.deadline;
-      if (osData.deadline && !isNaN(Date.parse(osData.deadline))) {
-        deadlineText = new Date(osData.deadline).toLocaleDateString('pt-BR');
+      // Nova página se necessário
+      if (currentY + alturaLinha > 700) {
+        doc.addPage();
+        currentY = 50;
       }
-      doc.text(`Prazo: ${deadlineText}`);
-      doc.text(`Forma de Pagamento: ${osData.payment}`);
-      doc.moveDown();
 
-      // Items
-      doc.fontSize(16).text('ITENS:', { underline: true });
-      doc.moveDown(0.5);
-      
-      doc.fontSize(12);
-      let yPos = doc.y;
-      
-      // Table header
-      doc.text('Descrição', 50, yPos);
-      doc.text('Qtd', 300, yPos);
-      doc.text('Vl Unit.', 350, yPos);
-      doc.text('Total', 450, yPos);
-      
-      yPos += 20;
-      doc.moveTo(50, yPos).lineTo(550, yPos).stroke();
-      doc.y = yPos + 10;
+      // Linha horizontal
+      doc.rect(margemEsq, currentY, larguraTotal, alturaLinha).stroke();
 
-      // Items rows
-      const itemsArray = typeof osData.items === 'string' ? JSON.parse(osData.items) : osData.items;
-      itemsArray.forEach(item => {
-        const lineHeight = 30;
-        const currentY = doc.y;
-
-        // Wrap description if too long
-        const descLines = doc.heightOfString(item.description, { width: 230 });
+      // Conteúdo da linha
+      posX = margemEsq;
+      
+      colunas.forEach((col, index) => {
+        // Desenhar linha vertical entre colunas
+        if (index > 0) {
+          doc.moveTo(posX, currentY).lineTo(posX, currentY + alturaLinha).stroke();
+        }
         
-        doc.text(item.description, 50, currentY, { width: 230 });
-        doc.text(item.quantity.toString(), 300, currentY);
-        doc.text(`R$ ${parseFloat(item.unitValue).toFixed(2)}`, 350, currentY);
-        doc.text(`R$ ${parseFloat(item.total).toFixed(2)}`, 450, currentY);
-
-        doc.y += Math.max(descLines, lineHeight);
+        let texto = '';
+        switch(index) {
+          case 0: // Quantidade
+            texto = item.quantity.toString();
+            break;
+          case 1: // Descrição
+            texto = item.description;
+            break;
+          case 2: // Valor Unitário
+            texto = this.formatarMoeda(item.unitValue);
+            break;
+          case 3: // Desconto
+            texto = descontoItem > 0 ? `${descontoItem}%` : '-';
+            break;
+          case 4: // Valor Total
+            texto = this.formatarMoeda(valorFinal);
+            break;
+        }
         
-        doc.moveTo(50, doc.y - 5).lineTo(550, doc.y - 5).stroke();
+        doc.text(texto, posX + 3, currentY + 8, { 
+          width: col.width - 6, 
+          align: 'center' 
+        });
+        
+        posX += col.width;
       });
 
-      doc.moveDown();
+      currentY += alturaLinha;
+    });
 
-      // Subtotal and Discount
-      const subtotal = itemsArray.reduce((sum, item) => sum + parseFloat(item.total), 0);
-      const discount = parseFloat(osData.discount || 0);
-      const total = subtotal - discount;
+    // ========== LINHAS FINAIS - SUBTOTAL, DESCONTO E TOTAL ==========
+    const alturaLinha = 25;
+    
+    // Calcular valores SEM desconto (subtotal bruto)
+    let subtotalBruto = 0;
+    let descontoTotalItens = 0;
+    
+    dados.items.forEach(item => {
+      const valorBrutoItem = parseFloat(item.quantity) * parseFloat(item.unitValue);
+      subtotalBruto += valorBrutoItem;
+      
+      // Calcular desconto do item
+      if (item.discount && parseFloat(item.discount) > 0) {
+        const descontoItem = (valorBrutoItem * parseFloat(item.discount)) / 100;
+        descontoTotalItens += descontoItem;
+      }
+    });
 
-      doc.fontSize(14);
-      doc.text(`Subtotal: R$ ${subtotal.toFixed(2)}`, { align: 'right' });
-      doc.text(`Desconto: R$ ${discount.toFixed(2)}`, { align: 'right' });
-      doc.moveDown();
-      doc.fontSize(16);
-      doc.text(`TOTAL: R$ ${total.toFixed(2)}`, { align: 'right', underline: true });
+    // Subtotal após descontos dos itens
+    const subtotalAposDescontoItens = subtotalBruto - descontoTotalItens;
+    
+    // Desconto geral aplicado sobre o subtotal já com desconto dos itens
+    const descontoGeral = dados.discount && parseFloat(dados.discount) > 0 
+      ? (subtotalAposDescontoItens * parseFloat(dados.discount)) / 100 
+      : 0;
+    
+    const valorTotal = subtotalAposDescontoItens - descontoGeral;
+    
+    // Verificar se tem algum desconto (item ou geral)
+    const temDescontoItem = descontoTotalItens > 0;
+    const temDescontoGeral = descontoGeral > 0;
+    const temDesconto = temDescontoItem || temDescontoGeral;
 
-      doc.moveDown(2);
+    const larguraTexto = colunas[0].width + colunas[1].width + colunas[2].width + colunas[3].width;
+    const posXValor = margemEsq + larguraTexto;
 
-      // Images
-      const imagesArray = typeof osData.images === 'string' ? JSON.parse(osData.images) : osData.images;
-      if (imagesArray && imagesArray.length > 0) {
-        doc.fontSize(14).text('IMAGENS:', { underline: true });
-        doc.moveDown(0.5);
+    // Se tiver desconto de ITEM, mostrar SUBTOTAL (valor bruto)
+    if (temDescontoItem) {
+      doc.rect(margemEsq, currentY, larguraTotal, alturaLinha).stroke();
+      
+      // Linha vertical antes do valor
+      doc.moveTo(posXValor, currentY).lineTo(posXValor, currentY + alturaLinha).stroke();
+      
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#000000');
+      
+      doc.text('SUBTOTAL', margemEsq + 5, currentY + 8, {
+        width: larguraTexto - 10,
+        align: 'center'
+      });
+      
+      doc.text(this.formatarMoeda(subtotalBruto), posXValor + 3, currentY + 8, {
+        width: colunas[4].width - 6,
+        align: 'center'
+      });
+      
+      currentY += alturaLinha;
+      
+      // Mostrar linha de DESCONTO DOS ITENS
+      doc.rect(margemEsq, currentY, larguraTotal, alturaLinha).stroke();
+      
+      // Linha vertical antes do valor
+      doc.moveTo(posXValor, currentY).lineTo(posXValor, currentY + alturaLinha).stroke();
+      
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#000000');
+      
+      doc.text('DESCONTO', margemEsq + 5, currentY + 8, {
+        width: larguraTexto - 10,
+        align: 'center'
+      });
+      
+      doc.text(`- ${this.formatarMoeda(descontoTotalItens)}`, posXValor + 3, currentY + 8, {
+        width: colunas[4].width - 6,
+        align: 'center'
+      });
+      
+      currentY += alturaLinha;
+    }
 
-        imagesArray.forEach(imagePath => {
+    // Se tiver desconto GERAL (além do desconto de item), mostrar linha adicional
+    if (temDescontoGeral) {
+      doc.rect(margemEsq, currentY, larguraTotal, alturaLinha).stroke();
+      
+      // Linha vertical antes do valor
+      doc.moveTo(posXValor, currentY).lineTo(posXValor, currentY + alturaLinha).stroke();
+      
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('#000000');
+      
+      doc.text(temDescontoItem ? 'DESCONTO ADICIONAL' : 'DESCONTO', margemEsq + 5, currentY + 8, {
+        width: larguraTexto - 10,
+        align: 'center'
+      });
+      
+      doc.text(`- ${this.formatarMoeda(descontoGeral)}`, posXValor + 3, currentY + 8, {
+        width: colunas[4].width - 6,
+        align: 'center'
+      });
+      
+      currentY += alturaLinha;
+    }
+
+    // VALOR TOTAL (sempre aparece)
+    doc.rect(margemEsq, currentY, larguraTotal, alturaLinha).stroke();
+    
+    // Linha vertical antes do valor
+    doc.moveTo(posXValor, currentY).lineTo(posXValor, currentY + alturaLinha).stroke();
+    
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#000000');
+    
+    doc.text('VALOR TOTAL', margemEsq + 5, currentY + 8, {
+      width: larguraTexto - 10,
+      align: 'center'
+    });
+
+    doc.text(this.formatarMoeda(valorTotal), posXValor + 3, currentY + 8, {
+      width: colunas[4].width - 6,
+      align: 'center'
+    });
+
+    doc.y = currentY + alturaLinha + 20;
+  }
+
+  adicionarDadosCliente(doc, dados) {
+    doc
+      .fontSize(11)
+      .font('Helvetica-Bold')
+      .fillColor('#000000')
+      .text(`Cliente: ${dados.clientName}`, 50)
+      .moveDown(0.5)
+      .text(`Prazo de entrega: ${this.formatarData(dados.deadline)}`)
+      .moveDown(0.5)
+      .text(`Forma de Pagamento: ${dados.payment}`)
+      .moveDown(2);
+  }
+
+  adicionarAssinaturas(doc) {
+    if (doc.y > 600) {
+      doc.addPage();
+      doc.y = 100;
+    }
+
+    const dataAtual = new Date().toLocaleDateString('pt-BR');
+    doc
+      .fontSize(11)
+      .font('Helvetica')
+      .text(`João Pessoa, ${dataAtual}`, 350, doc.y)
+      .moveDown(4);
+
+    const lineY = doc.y;
+    doc.moveTo(100, lineY).lineTo(250, lineY).stroke();
+    doc.moveTo(350, lineY).lineTo(500, lineY).stroke();
+
+    doc
+      .fontSize(11)
+      .text('Artestofados', 140, lineY + 15, { align: 'center', width: 110 })
+      .text('Cliente', 390, lineY + 15, { align: 'center', width: 110 });
+  }
+
+  adicionarImagensUsuario(doc, imagens) {
+    if (!imagens || imagens.length === 0) return;
+
+    doc.addPage();
+    doc
+      .fontSize(14)
+      .font('Helvetica-Bold')
+      .text('Anexos do Cliente', { align: 'center' });
+    doc.moveDown(2);
+
+    let posY = 100;
+    for (const imageName of imagens) {
+      try {
+        const imagePath = path.join(this.uploadsDir, imageName);
+        
+        if (!fs.existsSync(imagePath)) {
+          console.warn(`⚠️ Imagem não encontrada: ${imageName}`);
+          continue;
+        }
+
+        if (posY > 650) {
+          doc.addPage();
+          posY = 100;
+        }
+
+        doc.image(imagePath, 100, posY, { 
+          fit: [400, 400], 
+          align: 'center', 
+          valign: 'center' 
+        });
+        posY += 420;
+      } catch (err) {
+        console.error('❌ Erro ao adicionar imagem:', err);
+      }
+    }
+  }
+
+  async generateOSPDF(osData) {
+    return new Promise((resolve, reject) => {
+      try {
+        console.log('📄 Iniciando geração de PDF...');
+        
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
+        const filename = `os_${osData.id || 'new'}_${Date.now()}.pdf`;
+        const filepath = path.join(this.uploadsDir, filename);
+
+        const stream = fs.createWriteStream(filepath);
+
+        stream.on('error', (error) => {
+          console.error('❌ Erro na stream:', error);
+          reject(error);
+        });
+
+        doc.on('error', (error) => {
+          console.error('❌ Erro no documento:', error);
+          reject(error);
+        });
+
+        doc.pipe(stream);
+
+        // Gerar PDF com estrutura IDÊNTICA ao original
+        this.adicionarCabecalho(doc);
+        this.adicionarTabelaItens(doc, osData);
+        this.adicionarDadosCliente(doc, osData);
+        this.adicionarAssinaturas(doc);
+
+        // Adicionar imagens se houver
+        if (osData.images && osData.images.length > 0) {
+          const imagesArray = typeof osData.images === 'string' 
+            ? JSON.parse(osData.images) 
+            : osData.images;
+          this.adicionarImagensUsuario(doc, imagesArray);
+        }
+
+        doc.end();
+
+        stream.on('finish', async () => {
           try {
-            const fullImagePath = path.join(__dirname, '../../uploads', imagePath);
-            if (fs.existsSync(fullImagePath)) {
-              const imgHeight = 150;
-              const imgWidth = 200;
+            const stats = fs.statSync(filepath);
+            console.log('✅ PDF criado com sucesso. Tamanho:', stats.size, 'bytes');
 
-              // Add image if there's space, otherwise add a new page
-              if (doc.y + imgHeight > doc.page.height - 100) {
-                doc.addPage();
-              }
-
-              doc.image(fullImagePath, {
-                fit: [imgWidth, imgHeight],
-                align: 'center',
-              });
-
-              doc.moveDown();
-            }
+            resolve({ 
+              filename, 
+              filepath,
+              size: stats.size
+            });
           } catch (error) {
-            console.error(`Error adding image ${imagePath}:`, error);
+            console.error('❌ Erro ao finalizar PDF:', error);
+            reject(error);
           }
         });
+
+      } catch (error) {
+        console.error('❌ Erro ao criar documento:', error);
+        reject(error);
       }
-
-      doc.moveDown(2);
-
-      // Signatures
-      doc.fontSize(14).text('ASSINATURAS:', { underline: true });
-      doc.moveDown(1);
-      
-      const signatureLine = doc.y;
-      doc.moveTo(50, signatureLine).lineTo(250, signatureLine).stroke();
-      doc.text('Cliente', 50, signatureLine + 10);
-
-      doc.moveTo(300, signatureLine).lineTo(500, signatureLine).stroke();
-      doc.text('Responsável', 300, signatureLine + 10);
-
-      doc.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
+    });
+  }
 }
 
 module.exports = {
-  generateOSPDF,
+  generateOSPDF: async (osData) => {
+    const service = new PDFService();
+    return service.generateOSPDF(osData);
+  }
 };

@@ -42,6 +42,7 @@ const osController = {
       // Handle file uploads first
       upload.array('images', 10)(req, res, async (err) => {
         if (err) {
+          console.error('Multer error:', err);
           return res.status(400).json({ error: err.message });
         }
 
@@ -49,31 +50,60 @@ const osController = {
           const { clientName, deadline, payment, items, discount } = req.body;
           const uploadedImages = req.files || [];
 
+          console.log('📥 Dados recebidos:', {
+            clientName,
+            deadline,
+            payment,
+            items: typeof items === 'string' ? 'String' : 'Array',
+            discount,
+            imagesCount: uploadedImages.length
+          });
+
           // Validation
-          if (!clientName || !deadline || !payment || !items || items.length === 0) {
+          if (!clientName || !deadline || !payment) {
             return res.status(400).json({ 
-              error: 'Missing required fields: clientName, deadline, payment, items' 
+              error: 'Campos obrigatórios faltando: clientName, deadline, payment' 
+            });
+          }
+
+          // Parse items if it's a string
+          let itemsArray;
+          try {
+            itemsArray = typeof items === 'string' ? JSON.parse(items) : items;
+          } catch (parseError) {
+            console.error('Erro ao fazer parse dos items:', parseError);
+            return res.status(400).json({ error: 'Items inválido' });
+          }
+
+          if (!itemsArray || itemsArray.length === 0) {
+            return res.status(400).json({ 
+              error: 'É necessário informar ao menos um item' 
             });
           }
 
           // Validate items structure
-          const itemsArray = typeof items === 'string' ? JSON.parse(items) : items;
           for (const item of itemsArray) {
             if (!item.description || !item.quantity || !item.unitValue) {
               return res.status(400).json({ 
-                error: 'Each item must have: description, quantity, unitValue' 
+                error: 'Cada item deve ter: description, quantity, unitValue' 
               });
             }
-            // Calculate total if not provided
+            // Ensure total is calculated
             if (!item.total) {
-              item.total = (parseFloat(item.quantity) * parseFloat(item.unitValue)).toFixed(2);
+              const qty = parseFloat(item.quantity);
+              const unitVal = parseFloat(item.unitValue);
+              const itemDiscount = parseFloat(item.discount || 0);
+              const subtotal = qty * unitVal;
+              item.total = (subtotal - (subtotal * itemDiscount / 100)).toFixed(2);
             }
           }
+
+          console.log('✅ Itens validados:', itemsArray);
 
           // Prepare image filenames
           const imageFilenames = uploadedImages.map(file => file.filename);
 
-          // Create OS
+          // Create OS in database
           const osData = await OrdemServico.create({
             clientName,
             deadline,
@@ -83,12 +113,30 @@ const osController = {
             images: imageFilenames,
           });
 
-          // Generate PDF with images
-          const pdf = await pdfService.generateOSPDF({
-            ...osData,
-            items: osData.items,
-            images: osData.images,
+          console.log('💾 OS criada no banco:', osData.id);
+
+          // Generate PDF with all data
+          const pdfData = {
+            id: osData.id,
+            clientName: osData.client_name,
+            deadline: osData.deadline,
+            payment: osData.payment,
+            items: typeof osData.items === 'string' ? JSON.parse(osData.items) : osData.items,
+            discount: osData.discount,
+            images: typeof osData.images === 'string' ? JSON.parse(osData.images) : osData.images,
+            createdAt: osData.created_at,
+          };
+
+          console.log('📄 Gerando PDF com dados:', {
+            id: pdfData.id,
+            clientName: pdfData.clientName,
+            itemsCount: pdfData.items.length,
+            discount: pdfData.discount
           });
+
+          const pdf = await pdfService.generateOSPDF(pdfData);
+
+          console.log('✅ PDF gerado:', pdf.filename);
 
           // Update OS with PDF path
           await OrdemServico.update(osData.id, {
@@ -96,21 +144,28 @@ const osController = {
           });
 
           res.json({
+            success: true,
             message: 'OS created successfully',
-            os: osData,
+            os: {
+              id: osData.id,
+              clientName: osData.client_name,
+              deadline: osData.deadline,
+              payment: osData.payment,
+              discount: osData.discount,
+            },
             pdf: {
               filename: pdf.filename,
               path: `/uploads/${pdf.filename}`,
             },
           });
         } catch (error) {
-          console.error('Error creating OS:', error);
-          res.status(500).json({ error: 'Failed to create OS' });
+          console.error('❌ Error creating OS:', error);
+          res.status(500).json({ error: 'Failed to create OS: ' + error.message });
         }
       });
     } catch (error) {
-      console.error('Error creating OS:', error);
-      res.status(500).json({ error: 'Failed to create OS' });
+      console.error('❌ Error creating OS:', error);
+      res.status(500).json({ error: 'Failed to create OS: ' + error.message });
     }
   },
 
@@ -181,8 +236,6 @@ const osController = {
         return res.status(404).json({ error: 'PDF not generated yet' });
       }
 
-      const path = require('path');
-      const fs = require('fs');
       const filepath = path.join(__dirname, '../../uploads', os.pdf_path);
 
       if (!fs.existsSync(filepath)) {
@@ -245,4 +298,3 @@ const osController = {
 };
 
 module.exports = osController;
-

@@ -83,6 +83,10 @@ function BancoOS() {
     }
   };
 
+  const closeModal = () => {
+    setSelectedOS(null);
+  };
+
   return (
     <div className="banco-os-page">
       <h1>📦 Banco de OS</h1>
@@ -210,7 +214,12 @@ function BancoOS() {
                   {(typeof selectedOS.items === 'string' ? JSON.parse(selectedOS.items) : selectedOS.items || []).map((item, index) => (
                     <div key={index} className="item-detail">
                       <p><strong>{item.description}</strong></p>
-                      <p>{item.quantity} x R$ {parseFloat(item.unitValue).toFixed(2)} = R$ {parseFloat(item.total).toFixed(2)}</p>
+                      <p>Quantidade: {item.quantity}</p>
+                      <p>Valor Unitário: R$ {parseFloat(item.unitValue).toFixed(2)}</p>
+                      {item.discount > 0 && (
+                        <p>Desconto Item: {item.discount}%</p>
+                      )}
+                      <p><strong>Total: R$ {parseFloat(item.total).toFixed(2)}</strong></p>
                     </div>
                   ))}
                 </div>
@@ -255,4 +264,3 @@ function BancoOS() {
 }
 
 export default BancoOS;
-
