@@ -9,7 +9,6 @@ function Chatbot() {
   const [atendimentos, setAtendimentos] = useState([]);
   const [loading, setLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState('');
-  const [selectedOS, setSelectedOS] = useState(null);
   const pollIntervalRef = useRef(null);
   const attemptCountRef = useRef(0);
 
@@ -17,10 +16,14 @@ function Chatbot() {
     loadStatus();
     loadAtendimentos();
     
+    // Auto-refresh atendimentos a cada 60 segundos
+    const refreshInterval = setInterval(loadAtendimentos, 60000);
+    
     return () => {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
       }
+      clearInterval(refreshInterval);
     };
   }, []);
 
@@ -130,7 +133,22 @@ function Chatbot() {
   const loadAtendimentos = async () => {
     try {
       const data = await chatbotAPI.getAtendimentos();
-      setAtendimentos(data.atendimentos || []);
+      const statusData = await chatbotAPI.getStatus();
+      
+      // Enriquecer atendimentos com informação de pausa
+      const enrichedAtendimentos = data.atendimentos.map(atendimento => {
+        const pauseInfo = statusData.chatPauses?.find(
+          pause => pause.phone === atendimento.phoneNumber
+        );
+        
+        return {
+          ...atendimento,
+          isPaused: !!pauseInfo,
+          pausedUntil: pauseInfo?.pausedUntil
+        };
+      });
+      
+      setAtendimentos(enrichedAtendimentos || []);
     } catch (error) {
       console.error('❌ Error loading atendimentos:', error);
     }
@@ -149,15 +167,9 @@ function Chatbot() {
       
       setDebugInfo('Aguardando geração do QR Code...');
       
-      // Aguardar 5 segundos para o backend gerar o QR code
       await new Promise(resolve => setTimeout(resolve, 5000));
-      
-      // Tentar carregar o QR code imediatamente
       await loadQRCode();
-      
-      // Iniciar polling para continuar verificando
       startQRPolling();
-      
       await loadStatus();
     } catch (error) {
       console.error('❌ Error connecting:', error);
@@ -212,6 +224,28 @@ function Chatbot() {
     }
   };
 
+  const handlePausarChat = async (phoneNumber) => {
+    try {
+      await chatbotAPI.pausarChat(phoneNumber);
+      alert(`✅ Bot pausado para ${phoneNumber}.\nVocê pode responder manualmente agora.`);
+      await loadAtendimentos();
+    } catch (error) {
+      console.error('❌ Error pausing chat:', error);
+      alert('Erro ao pausar chat: ' + error.message);
+    }
+  };
+
+  const handleRetomarChat = async (phoneNumber) => {
+    try {
+      await chatbotAPI.retomarChat(phoneNumber);
+      alert(`✅ Bot retomado para ${phoneNumber}.\nO bot voltará a responder automaticamente.`);
+      await loadAtendimentos();
+    } catch (error) {
+      console.error('❌ Error resuming chat:', error);
+      alert('Erro ao retomar chat: ' + error.message);
+    }
+  };
+
   const handleManualRefresh = async () => {
     console.log('🔄 Manual refresh requested');
     setDebugInfo('Atualizando manualmente...');
@@ -235,7 +269,15 @@ function Chatbot() {
     return statusMap[statusObj.status] || statusObj.status;
   };
 
-  const closeModal = () => {setSelectedOS(null);
+  const formatPausedUntil = (pausedUntil) => {
+    if (!pausedUntil) return '';
+    const date = new Date(pausedUntil);
+    return date.toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
   };
 
   return (
@@ -280,14 +322,14 @@ function Chatbot() {
                 disabled={loading || status?.paused}
                 className="btn btn-warning"
               >
-                ⏸️ Pausar Bot
+                ⏸️ Pausar Bot (Global)
               </button>
               <button 
                 onClick={handleRetomar} 
                 disabled={loading || !status?.paused}
                 className="btn btn-success"
               >
-                ▶️ Retomar Bot
+                ▶️ Retomar Bot (Global)
               </button>
             </>
           )}
@@ -386,14 +428,19 @@ function Chatbot() {
         ) : (
           <div className="atendimentos-list">
             {atendimentos.map(atendimento => (
-              <div key={atendimento.id} className="atendimento-card" style={{
-                border: '1px solid #e5e7eb',
-                borderRadius: '8px',
-                padding: '16px',
-                marginBottom: '12px',
-                backgroundColor: '#ffffff',
-                boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
-              }}>
+              <div 
+                key={atendimento.id} 
+                className={`atendimento-card ${atendimento.isPaused ? 'paused' : 'active'}`}
+                style={{
+                  border: '1px solid #e5e7eb',
+                  borderLeft: `4px solid ${atendimento.isPaused ? '#ffc107' : '#28a745'}`,
+                  borderRadius: '8px',
+                  padding: '16px',
+                  marginBottom: '12px',
+                  backgroundColor: atendimento.isPaused ? '#fff9e6' : '#ffffff',
+                  boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
+                }}
+              >
                 <div className="atendimento-header" style={{
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -414,12 +461,62 @@ function Chatbot() {
                     {atendimento.state}
                   </span>
                 </div>
-                <div className="atendimento-meta" style={{ fontSize: '14px', color: '#6b7280' }}>
+                
+                {atendimento.isPaused && (
+                  <div style={{
+                    padding: '8px',
+                    backgroundColor: '#ffc107',
+                    color: '#000',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                    marginBottom: '8px',
+                    fontWeight: '500'
+                  }}>
+                    ⏸️ Atendimento Manual até {formatPausedUntil(atendimento.pausedUntil)}
+                  </div>
+                )}
+                
+                <div className="atendimento-meta" style={{ fontSize: '14px', color: '#6b7280', marginBottom: '12px' }}>
                   <small>🕒 {new Date(atendimento.createdAt).toLocaleString('pt-BR')}</small>
                   {atendimento.metadata && Object.keys(atendimento.metadata).length > 0 && (
-                    <div style={{ marginTop: '8px' }}>
+                    <div style={{ marginTop: '8px', fontSize: '12px' }}>
                       <strong>Dados:</strong> {JSON.stringify(atendimento.metadata, null, 2)}
                     </div>
+                  )}
+                </div>
+                
+                <div className="atendimento-actions" style={{
+                  display: 'flex',
+                  gap: '8px'
+                }}>
+                  {!atendimento.isPaused ? (
+                    <button 
+                      onClick={() => handlePausarChat(atendimento.phoneNumber)}
+                      className="btn btn-warning"
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '13px',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      ⏸️ Assumir Atendimento
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={() => handleRetomarChat(atendimento.phoneNumber)}
+                      className="btn btn-success"
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '13px',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      ▶️ Liberar Bot
+                    </button>
                   )}
                 </div>
               </div>
@@ -432,6 +529,24 @@ function Chatbot() {
         @keyframes spin {
           0% { transform: rotate(0deg); }
           100% { transform: rotate(360deg); }
+        }
+        
+        .atendimento-card.paused {
+          animation: pulse-yellow 2s ease-in-out infinite;
+        }
+        
+        .atendimento-card.active {
+          animation: pulse-green 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse-yellow {
+          0%, 100% { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); }
+          50% { box-shadow: 0 4px 8px rgba(255, 193, 7, 0.3); }
+        }
+        
+        @keyframes pulse-green {
+          0%, 100% { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); }
+          50% { box-shadow: 0 4px 8px rgba(40, 167, 69, 0.2); }
         }
       `}</style>
     </div>

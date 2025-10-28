@@ -30,7 +30,7 @@ router.post('/desconectar', chatbotController.desconectar);
  * @swagger
  * /chatbot/pausar:
  *   post:
- *     summary: Pause the bot
+ *     summary: Pause the bot globally
  *     tags: [Chatbot]
  *     requestBody:
  *       required: false
@@ -50,9 +50,63 @@ router.post('/pausar', chatbotController.pausar);
 
 /**
  * @swagger
+ * /chatbot/pausar-chat:
+ *   post:
+ *     summary: Pause bot for specific chat (when human takes over)
+ *     tags: [Chatbot]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - phoneNumber
+ *             properties:
+ *               phoneNumber:
+ *                 type: string
+ *                 description: Phone number to pause (without @c.us)
+ *                 example: "5511999999999"
+ *               hours:
+ *                 type: number
+ *                 default: 2
+ *                 description: Hours to pause
+ *     responses:
+ *       200:
+ *         description: Chat paused successfully
+ */
+router.post('/pausar-chat', chatbotController.pausarChat);
+
+/**
+ * @swagger
+ * /chatbot/retomar-chat:
+ *   post:
+ *     summary: Resume bot for specific chat
+ *     tags: [Chatbot]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - phoneNumber
+ *             properties:
+ *               phoneNumber:
+ *                 type: string
+ *                 description: Phone number to resume
+ *                 example: "5511999999999"
+ *     responses:
+ *       200:
+ *         description: Chat resumed successfully
+ */
+router.post('/retomar-chat', chatbotController.retomarChat);
+
+/**
+ * @swagger
  * /chatbot/retomar:
  *   post:
- *     summary: Resume the bot
+ *     summary: Resume the bot globally
  *     tags: [Chatbot]
  *     responses:
  *       200:
@@ -97,4 +151,3 @@ router.get('/status', chatbotController.status);
 router.get('/qrcode', chatbotController.qrCode);
 
 module.exports = router;
-

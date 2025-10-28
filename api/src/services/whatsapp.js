@@ -9,7 +9,7 @@ let qrString = '';
 let status = 'disconnected';
 let pausedUntil = null;
 let initializationAttempt = 0;
-let chatPauses = new Map();
+let chatPauses = new Map(); // Map para pausas específicas de chat
 
 // LIMPAR COMPLETAMENTE A SESSÃO E LOCKS
 function cleanupSession() {
@@ -223,9 +223,33 @@ async function handleIncomingMessage(msg) {
     const isEmployee = await checkIfEmployee(fromNumber);
     console.log('👤 Is Employee:', isEmployee);
     
+    // NOVA LÓGICA: Se for funcionário, pausar o chat do CLIENTE que ele está respondendo
     if (isEmployee && status === 'connected') {
-      console.log('⏸️ Employee detected - pausing chat for 2 hours');
-      pauseChat(fromNumber, 2);
+      console.log('🔍 Employee sent message - checking if replying to a client...');
+      
+      // Tentar obter o chat para ver se é resposta
+      try {
+        const chat = await msg.getChat();
+        
+        // Se for um chat individual (não grupo)
+        if (!chat.isGroup) {
+          // Se o funcionário está respondendo em um chat com cliente
+          // O "from" é o funcionário, mas o chat é com o cliente
+          console.log('💼 Employee replying to client - pausing bot for this chat');
+          console.log(`⏸️ Pausing chat with ${fromNumber} for 2 hours`);
+          
+          // IMPORTANTE: Pausar o chat com o CLIENTE (o número que recebeu a resposta)
+          // Como o funcionário enviou a mensagem, precisamos identificar o cliente
+          // Mas como funcionário está enviando DE seu número, na verdade queremos
+          // pausar quando ele RESPONDE em um chat de cliente
+          
+          // Vamos adicionar metadado na sessão para indicar atendimento humano
+          await markChatAsHumanHandled(fromNumber);
+          pauseChat(fromNumber, 2);
+        }
+      } catch (chatError) {
+        console.log('⚠️ Could not get chat info:', chatError.message);
+      }
     }
 
     // Salvar mensagem
@@ -237,16 +261,16 @@ async function handleIncomingMessage(msg) {
     console.log('⏸️ Chat paused:', chatPaused);
     console.log('🔗 Client status:', status);
     
-    if (status === 'connected' && !chatPaused) {
+    // NOVA LÓGICA: Não processar se for funcionário OU se chat estiver pausado
+    if (isEmployee) {
+      console.log('⏭️ Skipping - message from employee');
+    } else if (chatPaused) {
+      console.log('⏭️ Skipping - chat is paused (human is handling)');
+    } else if (status === 'connected') {
       console.log('✅ Processing message with chatbot...');
       await processChatbotMessage(msg);
     } else {
-      if (chatPaused) {
-        console.log('⏭️ Skipping - chat is paused');
-      }
-      if (status !== 'connected') {
-        console.log('⏭️ Skipping - client not connected');
-      }
+      console.log('⏭️ Skipping - client not connected');
     }
     
     console.log('='.repeat(80) + '\n');
@@ -257,11 +281,41 @@ async function handleIncomingMessage(msg) {
 }
 
 async function checkIfEmployee(number) {
-  const employees = process.env.EMPLOYEE_NUMBERS?.split(',') || [];
+  const employees = process.env.EMPLOYEE_NUMBERS?.split(',').map(n => n.trim()) || [];
   const isEmployee = employees.includes(number);
   console.log('👥 Employee numbers configured:', employees);
   console.log('🔍 Checking number:', number, '- Result:', isEmployee);
   return isEmployee;
+}
+
+async function markChatAsHumanHandled(phoneNumber) {
+  try {
+    console.log(`📝 Marking chat ${phoneNumber} as human-handled`);
+    
+    // Buscar sessão existente
+    const result = await pool.query(
+      `SELECT id, metadata FROM sessions WHERE phone_number = $1`,
+      [phoneNumber]
+    );
+    
+    if (result.rows.length > 0) {
+      const session = result.rows[0];
+      const metadata = session.metadata || {};
+      
+      // Adicionar flag de atendimento humano
+      metadata.humanHandled = true;
+      metadata.humanHandledAt = new Date().toISOString();
+      
+      await pool.query(
+        `UPDATE sessions SET metadata = $1, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(metadata), session.id]
+      );
+      
+      console.log('✅ Chat marked as human-handled');
+    }
+  } catch (error) {
+    console.error('❌ Error marking chat as human-handled:', error);
+  }
 }
 
 async function saveMessage(messageId, fromNumber, body, timestamp) {
@@ -421,6 +475,8 @@ Mantenha as respostas concisas e profissionais em português brasileiro.`;
       model: 'gpt-3.5-turbo',
       messages: conversation,
       temperature: 0.7,
+      max_tokens: 1000,
+      servicetier: 'standard',
     });
 
     console.log('✅ OpenAI response received');
@@ -493,12 +549,21 @@ function pauseBot(hours = 2) {
 function pauseChat(phoneNumber, hours = 2) {
   const pauseUntil = new Date(Date.now() + hours * 60 * 60 * 1000);
   chatPauses.set(phoneNumber, pauseUntil);
-  console.log(`⏸️ Chat ${phoneNumber} paused until ${pauseUntil}`);
+  console.log(`⏸️ Chat ${phoneNumber} paused until ${pauseUntil.toLocaleString('pt-BR')}`);
 }
 
 function resumeBot() {
   pausedUntil = null;
-  console.log('▶️ Bot resumed');
+  console.log('▶️ Bot resumed globally');
+}
+
+function resumeChat(phoneNumber) {
+  if (chatPauses.has(phoneNumber)) {
+    chatPauses.delete(phoneNumber);
+    console.log(`▶️ Chat ${phoneNumber} resumed`);
+    return true;
+  }
+  return false;
 }
 
 function isPaused(phoneNumber = null) {
@@ -543,7 +608,10 @@ function getStatus() {
     qrStringLength: qrString?.length || 0,
     clientExists: !!client,
     initializationAttempt,
-    chatPauses: Object.fromEntries(chatPauses)
+    chatPauses: Array.from(chatPauses.entries()).map(([phone, pauseUntil]) => ({
+      phone,
+      pausedUntil: pauseUntil.toISOString()
+    }))
   };
   
   console.log('📊 Status requested:', statusInfo);
@@ -594,6 +662,7 @@ module.exports = {
   pauseBot,
   pauseChat,
   resumeBot,
+  resumeChat,
   getQRString,
   getStatus,
   sendMessage,

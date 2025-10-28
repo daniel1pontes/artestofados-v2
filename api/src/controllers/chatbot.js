@@ -7,16 +7,13 @@ const chatbotController = {
       console.log('🚀 CONNECT ENDPOINT CALLED');
       console.log('='.repeat(60));
       
-      // Iniciar conexão em background
       whatsappService.connect().catch(err => {
         console.error('❌ Error during background initialization:', err);
       });
       
-      // Aguardar um pouco para inicialização começar
       console.log('⏳ Waiting for initialization...');
       await new Promise(resolve => setTimeout(resolve, 3000));
       
-      // Retornar resposta imediata (polling vai buscar o QR depois)
       res.json({ 
         message: 'WhatsApp client initializing... Please check QR code via /chatbot/qrcode endpoint',
         status: whatsappService.getStatus(),
@@ -45,7 +42,7 @@ const chatbotController = {
   async pausar(req, res) {
     try {
       const { hours = 2 } = req.body;
-      console.log(`⏸️ General pause requested for ${hours} hours`);
+      console.log(`⏸️ Global pause requested for ${hours} hours`);
       whatsappService.pauseBot(hours);
       res.json({ 
         message: `Bot paused globally for ${hours} hours`,
@@ -57,12 +54,66 @@ const chatbotController = {
     }
   },
 
+  async pausarChat(req, res) {
+    try {
+      const { phoneNumber, hours = 2 } = req.body;
+      
+      if (!phoneNumber) {
+        return res.status(400).json({ error: 'phoneNumber is required' });
+      }
+      
+      console.log(`⏸️ Pause requested for chat ${phoneNumber} for ${hours} hours`);
+      whatsappService.pauseChat(phoneNumber, hours);
+      
+      res.json({ 
+        message: `Chat ${phoneNumber} paused for ${hours} hours`,
+        phoneNumber,
+        hours,
+        pausedUntil: new Date(Date.now() + hours * 60 * 60 * 1000).toISOString(),
+        status: whatsappService.getStatus(),
+      });
+    } catch (error) {
+      console.error('❌ Error pausing chat:', error);
+      res.status(500).json({ error: 'Failed to pause chat' });
+    }
+  },
+
+  async retomarChat(req, res) {
+    try {
+      const { phoneNumber } = req.body;
+      
+      if (!phoneNumber) {
+        return res.status(400).json({ error: 'phoneNumber is required' });
+      }
+      
+      console.log(`▶️ Resume requested for chat ${phoneNumber}`);
+      const resumed = whatsappService.resumeChat(phoneNumber);
+      
+      if (resumed) {
+        res.json({ 
+          message: `Chat ${phoneNumber} resumed`,
+          phoneNumber,
+          status: whatsappService.getStatus(),
+        });
+      } else {
+        res.json({ 
+          message: `Chat ${phoneNumber} was not paused`,
+          phoneNumber,
+          status: whatsappService.getStatus(),
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error resuming chat:', error);
+      res.status(500).json({ error: 'Failed to resume chat' });
+    }
+  },
+
   async retomar(req, res) {
     try {
-      console.log('▶️ Resume requested');
+      console.log('▶️ Global resume requested');
       whatsappService.resumeBot();
       res.json({ 
-        message: 'Bot resumed',
+        message: 'Bot resumed globally',
         status: whatsappService.getStatus(),
       });
     } catch (error) {
@@ -137,7 +188,7 @@ const chatbotController = {
       }
       
       res.json({ 
-        qrCode: qrString,  // Retorna a imagem Base64
+        qrCode: qrString,
         status: status.status,
         timestamp: new Date().toISOString()
       });

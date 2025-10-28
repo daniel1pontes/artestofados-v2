@@ -22,6 +22,16 @@ export const chatbotAPI = {
     return response.data;
   },
 
+  pausarChat: async (phoneNumber, hours = 2) => {
+    const response = await api.post('/chatbot/pausar-chat', { phoneNumber, hours });
+    return response.data;
+  },
+
+  retomarChat: async (phoneNumber) => {
+    const response = await api.post('/chatbot/retomar-chat', { phoneNumber });
+    return response.data;
+  },
+
   retomar: async () => {
     const response = await api.post('/chatbot/retomar');
     return response.data;
@@ -79,4 +89,3 @@ export const osAPI = {
 };
 
 export default api;
-
