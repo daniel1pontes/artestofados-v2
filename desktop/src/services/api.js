@@ -37,11 +37,6 @@ export const chatbotAPI = {
     return response.data;
   },
 
-  getAtendimentos: async () => {
-    const response = await api.get('/chatbot/atendimentos');
-    return response.data;
-  },
-
   getStatus: async () => {
     const response = await api.get('/chatbot/status');
     return response.data;

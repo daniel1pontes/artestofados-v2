@@ -122,27 +122,6 @@ const chatbotController = {
     }
   },
 
-  async atendimentos(req, res) {
-    try {
-      const SessaoChatbot = require('../models/sessaoChatbot');
-      const atendimentos = await SessaoChatbot.getAll();
-      
-      const formatted = atendimentos.map(session => ({
-        id: session.id,
-        phoneNumber: session.phone_number,
-        state: session.state,
-        metadata: session.metadata,
-        createdAt: session.created_at,
-        updatedAt: session.updated_at,
-      }));
-
-      res.json({ atendimentos: formatted });
-    } catch (error) {
-      console.error('❌ Error fetching atendimentos:', error);
-      res.status(500).json({ error: 'Failed to fetch atendimentos' });
-    }
-  },
-
   async status(req, res) {
     try {
       const status = whatsappService.getStatus();

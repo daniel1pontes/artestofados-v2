@@ -6,7 +6,6 @@ import './Chatbot.css';
 function Chatbot() {
   const [status, setStatus] = useState(null);
   const [qrString, setQrString] = useState('');
-  const [atendimentos, setAtendimentos] = useState([]);
   const [loading, setLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState('');
   const pollIntervalRef = useRef(null);
@@ -14,16 +13,11 @@ function Chatbot() {
 
   useEffect(() => {
     loadStatus();
-    loadAtendimentos();
-    
-    // Auto-refresh atendimentos a cada 60 segundos
-    const refreshInterval = setInterval(loadAtendimentos, 60000);
     
     return () => {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
       }
-      clearInterval(refreshInterval);
     };
   }, []);
 
@@ -49,7 +43,6 @@ function Chatbot() {
           setQrString('');
           clearInterval(pollIntervalRef.current);
           setDebugInfo('✅ Conectado com sucesso!');
-          await loadAtendimentos();
           return;
         }
 
@@ -130,30 +123,6 @@ function Chatbot() {
     }
   };
 
-  const loadAtendimentos = async () => {
-    try {
-      const data = await chatbotAPI.getAtendimentos();
-      const statusData = await chatbotAPI.getStatus();
-      
-      // Enriquecer atendimentos com informação de pausa
-      const enrichedAtendimentos = data.atendimentos.map(atendimento => {
-        const pauseInfo = statusData.chatPauses?.find(
-          pause => pause.phone === atendimento.phoneNumber
-        );
-        
-        return {
-          ...atendimento,
-          isPaused: !!pauseInfo,
-          pausedUntil: pauseInfo?.pausedUntil
-        };
-      });
-      
-      setAtendimentos(enrichedAtendimentos || []);
-    } catch (error) {
-      console.error('❌ Error loading atendimentos:', error);
-    }
-  };
-
   const handleConectar = async () => {
     setLoading(true);
     setQrString('');
@@ -203,6 +172,7 @@ function Chatbot() {
     try {
       await chatbotAPI.pausar();
       await loadStatus();
+      alert('✅ Bot pausado globalmente. Todas as mensagens serão ignoradas até retomar.');
     } catch (error) {
       console.error('❌ Error pausing:', error);
       alert('Erro ao pausar: ' + error.message);
@@ -216,33 +186,12 @@ function Chatbot() {
     try {
       await chatbotAPI.retomar();
       await loadStatus();
+      alert('✅ Bot retomado! Voltou a responder automaticamente.');
     } catch (error) {
       console.error('❌ Error resuming:', error);
       alert('Erro ao retomar: ' + error.message);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handlePausarChat = async (phoneNumber) => {
-    try {
-      await chatbotAPI.pausarChat(phoneNumber);
-      alert(`✅ Bot pausado para ${phoneNumber}.\nVocê pode responder manualmente agora.`);
-      await loadAtendimentos();
-    } catch (error) {
-      console.error('❌ Error pausing chat:', error);
-      alert('Erro ao pausar chat: ' + error.message);
-    }
-  };
-
-  const handleRetomarChat = async (phoneNumber) => {
-    try {
-      await chatbotAPI.retomarChat(phoneNumber);
-      alert(`✅ Bot retomado para ${phoneNumber}.\nO bot voltará a responder automaticamente.`);
-      await loadAtendimentos();
-    } catch (error) {
-      console.error('❌ Error resuming chat:', error);
-      alert('Erro ao retomar chat: ' + error.message);
     }
   };
 
@@ -255,29 +204,18 @@ function Chatbot() {
 
   const formatStatus = (statusObj) => {
     if (!statusObj) return 'Desconhecido';
-    if (statusObj.paused) return `Pausado até ${new Date(statusObj.pausedUntil).toLocaleString('pt-BR')}`;
+    if (statusObj.paused) return `🟡 Pausado até ${new Date(statusObj.pausedUntil).toLocaleString('pt-BR')}`;
     
     const statusMap = {
       'disconnected': '🔴 Desconectado',
       'qr_ready': '🟡 QR Code pronto para escanear',
       'authenticated': '🟢 Autenticado',
       'authenticating': '🟡 Autenticando',
-      'connected': '🟢 Conectado',
+      'connected': '🟢 Conectado e Ativo',
       'auth_failure': '🔴 Falha na autenticação'
     };
     
     return statusMap[statusObj.status] || statusObj.status;
-  };
-
-  const formatPausedUntil = (pausedUntil) => {
-    if (!pausedUntil) return '';
-    const date = new Date(pausedUntil);
-    return date.toLocaleString('pt-BR', {
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
   };
 
   return (
@@ -286,7 +224,7 @@ function Chatbot() {
 
       <div className="chatbot-controls">
         <div className="status-card">
-          <h2>Status</h2>
+          <h2>Status da Conexão</h2>
           <p className="status-text">{formatStatus(status)}</p>
           {status?.hasQRString && (
             <p style={{ fontSize: '12px', color: '#10b981', marginTop: '4px', fontWeight: '600' }}>
@@ -308,6 +246,7 @@ function Chatbot() {
           >
             {loading ? '⏳ Conectando...' : '📱 Conectar WhatsApp'}
           </button>
+          
           {status?.status === 'connected' && (
             <>
               <button 
@@ -321,15 +260,17 @@ function Chatbot() {
                 onClick={handlePausar} 
                 disabled={loading || status?.paused}
                 className="btn btn-warning"
+                title="Pausa o bot globalmente - todas as mensagens serão ignoradas"
               >
-                ⏸️ Pausar Bot (Global)
+                ⏸️ Pausar Bot
               </button>
               <button 
                 onClick={handleRetomar} 
                 disabled={loading || !status?.paused}
                 className="btn btn-success"
+                title="Retoma o bot - volta a responder automaticamente"
               >
-                ▶️ Retomar Bot (Global)
+                ▶️ Retomar Bot
               </button>
             </>
           )}
@@ -344,7 +285,7 @@ function Chatbot() {
             minHeight: '400px',
             textAlign: 'center'
           }}>
-            <h3>Escaneie o QR Code com o WhatsApp</h3>
+            <h3>📱 Escaneie o QR Code com o WhatsApp</h3>
             <div className="qr-code-wrapper" style={{ 
               border: '3px solid #10b981',
               padding: '20px',
@@ -353,7 +294,8 @@ function Chatbot() {
               display: 'flex',
               justifyContent: 'center',
               alignItems: 'center',
-              margin: '20px 0'
+              margin: '20px 0',
+              boxShadow: '0 4px 12px rgba(16, 185, 129, 0.2)'
             }}>
               {qrString.startsWith('data:image') ? (
                 <img src={qrString} alt="QR Code" style={{ maxWidth: '300px', height: 'auto' }} />
@@ -368,11 +310,12 @@ function Chatbot() {
                 />
               )}
             </div>
-            <p className="qr-instruction" style={{ marginTop: '16px', fontSize: '14px' }}>
+            <p className="qr-instruction" style={{ marginTop: '16px', fontSize: '14px', maxWidth: '400px' }}>
               <strong>Como escanear:</strong><br/>
               1. Abra o WhatsApp no celular<br/>
-              2. Menu (⋮) → Dispositivos conectados<br/>
-              3. Conectar dispositivo → Aponte para o QR Code acima
+              2. Toque em Menu (⋮) → <strong>Dispositivos conectados</strong><br/>
+              3. Toque em <strong>Conectar dispositivo</strong><br/>
+              4. Aponte a câmera para o QR Code acima
             </p>
             <button 
               onClick={handleManualRefresh}
@@ -414,139 +357,10 @@ function Chatbot() {
         )}
       </div>
 
-      <div className="atendimentos-section">
-        <h2>📋 Atendimentos</h2>
-        <button 
-          onClick={loadAtendimentos}
-          className="btn btn-secondary"
-          style={{ marginBottom: '16px', padding: '8px 16px', fontSize: '13px' }}
-        >
-          🔄 Atualizar Atendimentos
-        </button>
-        {atendimentos.length === 0 ? (
-          <p style={{ color: '#6b7280' }}>Nenhum atendimento ainda</p>
-        ) : (
-          <div className="atendimentos-list">
-            {atendimentos.map(atendimento => (
-              <div 
-                key={atendimento.id} 
-                className={`atendimento-card ${atendimento.isPaused ? 'paused' : 'active'}`}
-                style={{
-                  border: '1px solid #e5e7eb',
-                  borderLeft: `4px solid ${atendimento.isPaused ? '#ffc107' : '#28a745'}`,
-                  borderRadius: '8px',
-                  padding: '16px',
-                  marginBottom: '12px',
-                  backgroundColor: atendimento.isPaused ? '#fff9e6' : '#ffffff',
-                  boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)'
-                }}
-              >
-                <div className="atendimento-header" style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginBottom: '8px'
-                }}>
-                  <span className="atendimento-phone" style={{ fontWeight: '600', fontSize: '16px' }}>
-                    📞 {atendimento.phoneNumber}
-                  </span>
-                  <span className="atendimento-state" style={{
-                    padding: '4px 8px',
-                    borderRadius: '4px',
-                    fontSize: '12px',
-                    fontWeight: '500',
-                    backgroundColor: atendimento.state === 'initial' ? '#fef3c7' : '#d1fae5',
-                    color: atendimento.state === 'initial' ? '#92400e' : '#065f46'
-                  }}>
-                    {atendimento.state}
-                  </span>
-                </div>
-                
-                {atendimento.isPaused && (
-                  <div style={{
-                    padding: '8px',
-                    backgroundColor: '#ffc107',
-                    color: '#000',
-                    borderRadius: '4px',
-                    fontSize: '12px',
-                    marginBottom: '8px',
-                    fontWeight: '500'
-                  }}>
-                    ⏸️ Atendimento Manual até {formatPausedUntil(atendimento.pausedUntil)}
-                  </div>
-                )}
-                
-                <div className="atendimento-meta" style={{ fontSize: '14px', color: '#6b7280', marginBottom: '12px' }}>
-                  <small>🕒 {new Date(atendimento.createdAt).toLocaleString('pt-BR')}</small>
-                  {atendimento.metadata && Object.keys(atendimento.metadata).length > 0 && (
-                    <div style={{ marginTop: '8px', fontSize: '12px' }}>
-                      <strong>Dados:</strong> {JSON.stringify(atendimento.metadata, null, 2)}
-                    </div>
-                  )}
-                </div>
-                
-                <div className="atendimento-actions" style={{
-                  display: 'flex',
-                  gap: '8px'
-                }}>
-                  {!atendimento.isPaused ? (
-                    <button 
-                      onClick={() => handlePausarChat(atendimento.phoneNumber)}
-                      className="btn btn-warning"
-                      style={{
-                        padding: '6px 12px',
-                        fontSize: '13px',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      ⏸️ Assumir Atendimento
-                    </button>
-                  ) : (
-                    <button 
-                      onClick={() => handleRetomarChat(atendimento.phoneNumber)}
-                      className="btn btn-success"
-                      style={{
-                        padding: '6px 12px',
-                        fontSize: '13px',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer'
-                      }}
-                    >
-                      ▶️ Liberar Bot
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
       <style>{`
         @keyframes spin {
           0% { transform: rotate(0deg); }
           100% { transform: rotate(360deg); }
-        }
-        
-        .atendimento-card.paused {
-          animation: pulse-yellow 2s ease-in-out infinite;
-        }
-        
-        .atendimento-card.active {
-          animation: pulse-green 2s ease-in-out infinite;
-        }
-        
-        @keyframes pulse-yellow {
-          0%, 100% { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); }
-          50% { box-shadow: 0 4px 8px rgba(255, 193, 7, 0.3); }
-        }
-        
-        @keyframes pulse-green {
-          0%, 100% { box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); }
-          50% { box-shadow: 0 4px 8px rgba(40, 167, 69, 0.2); }
         }
       `}</style>
     </div>

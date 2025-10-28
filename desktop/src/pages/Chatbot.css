@@ -21,6 +21,7 @@
 .status-card h2 {
   font-size: 16px;
   margin-bottom: 8px;
+  color: #333333;
 }
 
 .status-text {
@@ -57,6 +58,8 @@
 
 .btn-primary:hover:not(:disabled) {
   background-color: #0056b3;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0, 123, 255, 0.3);
 }
 
 .btn-secondary {
@@ -66,6 +69,7 @@
 
 .btn-secondary:hover:not(:disabled) {
   background-color: #545b62;
+  transform: translateY(-1px);
 }
 
 .btn-warning {
@@ -75,6 +79,7 @@
 
 .btn-warning:hover:not(:disabled) {
   background-color: #e0a800;
+  transform: translateY(-1px);
 }
 
 .btn-success {
@@ -84,6 +89,7 @@
 
 .btn-success:hover:not(:disabled) {
   background-color: #218838;
+  transform: translateY(-1px);
 }
 
 .qr-code-container {
@@ -94,6 +100,7 @@
 .qr-code-container h3 {
   margin-bottom: 12px;
   font-size: 16px;
+  color: #333333;
 }
 
 .qr-code-wrapper {
@@ -114,52 +121,43 @@
   margin-top: 16px;
   font-size: 14px;
   color: #666666;
-  max-width: 300px;
   text-align: center;
+  line-height: 1.6;
 }
 
-.atendimentos-section {
+.info-section {
   background-color: #ffffff;
   border-radius: 8px;
   padding: 24px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-.atendimentos-list {
-  display: grid;
-  gap: 12px;
-}
-
-.atendimento-card {
-  padding: 16px;
-  background-color: #f8f9fa;
-  border-radius: 6px;
-  border: 1px solid #e5e7eb;
-}
-
-.atendimento-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.atendimento-phone {
-  font-weight: 600;
+.info-section h2 {
+  font-size: 18px;
+  margin-bottom: 16px;
   color: #333333;
 }
 
-.atendimento-state {
-  padding: 4px 12px;
-  background-color: #e0f2fe;
-  color: #0369a1;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
+.info-section ul {
+  margin-left: 20px;
 }
 
-.atendimento-meta {
-  color: #666666;
-  font-size: 12px;
+.info-section li {
+  margin-bottom: 8px;
+  line-height: 1.6;
 }
 
+/* Responsive */
+@media (max-width: 768px) {
+  .control-buttons {
+    flex-direction: column;
+  }
+  
+  .btn {
+    width: 100%;
+  }
+  
+  .qr-code-wrapper {
+    max-width: 100%;
+  }
+}

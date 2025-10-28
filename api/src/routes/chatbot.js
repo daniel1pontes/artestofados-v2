@@ -116,18 +116,6 @@ router.post('/retomar', chatbotController.retomar);
 
 /**
  * @swagger
- * /chatbot/atendimentos:
- *   get:
- *     summary: Get all atendimentos
- *     tags: [Chatbot]
- *     responses:
- *       200:
- *         description: List of atendimentos
- */
-router.get('/atendimentos', chatbotController.atendimentos);
-
-/**
- * @swagger
  * /chatbot/status:
  *   get:
  *     summary: Get bot status
