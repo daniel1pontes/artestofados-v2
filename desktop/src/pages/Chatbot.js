@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { chatbotAPI } from '../services/api';
-import { QRCodeSVG } from 'qrcode.react'; // Componente React para QR Code
+import { QRCodeSVG } from 'qrcode.react';
 import './Chatbot.css';
 
 function Chatbot() {
   const [status, setStatus] = useState(null);
-  const [qrString, setQrString] = useState(''); // String do QR Code
+  const [qrString, setQrString] = useState('');
   const [atendimentos, setAtendimentos] = useState([]);
   const [loading, setLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState('');
+  const [selectedOS, setSelectedOS] = useState(null);
   const pollIntervalRef = useRef(null);
   const attemptCountRef = useRef(0);
 
@@ -31,8 +32,6 @@ function Chatbot() {
       clearInterval(pollIntervalRef.current);
     }
 
-    loadQRCode();
-
     pollIntervalRef.current = setInterval(async () => {
       attemptCountRef.current += 1;
       console.log(`🔄 QR polling attempt #${attemptCountRef.current}`);
@@ -47,22 +46,22 @@ function Chatbot() {
           setQrString('');
           clearInterval(pollIntervalRef.current);
           setDebugInfo('✅ Conectado com sucesso!');
-          await loadAtendimentos(); // Recarregar atendimentos após conexão
+          await loadAtendimentos();
           return;
         }
 
         const qrData = await chatbotAPI.getQRCode();
         console.log('📱 QR response:', {
-          hasQRString: !!qrData.qrString,
-          length: qrData.qrString?.length || 0
+          hasQRCode: !!qrData.qrCode,
+          length: qrData.qrCode?.length || 0
         });
         
-        if (qrData.qrString) {
-          console.log('✅ QR String received!');
-          setQrString(qrData.qrString);
-          setDebugInfo(`✅ QR Code recebido! (${qrData.qrString.length} chars)`);
+        if (qrData.qrCode) {
+          console.log('✅ QR Code received!');
+          setQrString(qrData.qrCode);
+          setDebugInfo(`✅ QR Code recebido! (${qrData.qrCode.length} chars)`);
         } else {
-          console.log('⏳ QR String not ready yet');
+          console.log('⏳ QR Code not ready yet');
           setDebugInfo(`Aguardando QR... Tentativa ${attemptCountRef.current}`);
         }
       } catch (error) {
@@ -88,21 +87,14 @@ function Chatbot() {
       const qrData = await chatbotAPI.getQRCode();
       console.log('📱 QR Data received:', {
         hasQRCode: !!qrData.qrCode,
-        hasQRString: !!qrData.qrString,
         qrCodeLength: qrData.qrCode?.length || 0,
         keys: Object.keys(qrData)
       });
       
-      // Backend retorna 'qrCode' agora
       if (qrData.qrCode) {
         console.log('✅ QR Code received (Base64)!');
         setQrString(qrData.qrCode);
         setDebugInfo(`✅ QR Code carregado! (${qrData.qrCode.length} chars)`);
-      } else if (qrData.qrString) {
-        // Fallback para qrString se existir
-        console.log('✅ QR String received!');
-        setQrString(qrData.qrString);
-        setDebugInfo(`✅ QR Code carregado! (${qrData.qrString.length} chars)`);
       } else {
         console.log('⏳ QR Code not available yet');
         setDebugInfo('QR Code ainda não disponível');
@@ -121,8 +113,8 @@ function Chatbot() {
       
       if (statusData.status !== 'connected' && statusData.hasQRString) {
         const qrData = await chatbotAPI.getQRCode();
-        if (qrData.qrString) {
-          setQrString(qrData.qrString);
+        if (qrData.qrCode) {
+          setQrString(qrData.qrCode);
           setDebugInfo('QR Code já disponível');
         }
       } else if (statusData.status === 'connected') {
@@ -155,17 +147,16 @@ function Chatbot() {
       const response = await chatbotAPI.conectar();
       console.log('📡 Connect response:', response);
       
-      setDebugInfo('Aguardando geração do QR String...');
+      setDebugInfo('Aguardando geração do QR Code...');
       
-      if (response.qrString) {
-        console.log('✅ QR String received in response!');
-        setQrString(response.qrString);
-        setDebugInfo('✅ QR Code recebido na resposta!');
-      }
+      // Aguardar 5 segundos para o backend gerar o QR code
+      await new Promise(resolve => setTimeout(resolve, 5000));
       
-      setTimeout(() => {
-        startQRPolling();
-      }, 1000);
+      // Tentar carregar o QR code imediatamente
+      await loadQRCode();
+      
+      // Iniciar polling para continuar verificando
+      startQRPolling();
       
       await loadStatus();
     } catch (error) {
@@ -244,6 +235,9 @@ function Chatbot() {
     return statusMap[statusObj.status] || statusObj.status;
   };
 
+  const closeModal = () => {setSelectedOS(null);
+  };
+
   return (
     <div className="chatbot-page">
       <h1>💬 Chatbot WhatsApp</h1>
@@ -299,7 +293,6 @@ function Chatbot() {
           )}
         </div>
 
-        {/* EXIBIR QR CODE COMO IMAGEM BASE64 */}
         {qrString && status?.status !== 'connected' && (
           <div className="qr-code-container" style={{
             display: 'flex',
@@ -320,7 +313,6 @@ function Chatbot() {
               alignItems: 'center',
               margin: '20px 0'
             }}>
-              {/* IMAGEM BASE64 DO QR CODE */}
               {qrString.startsWith('data:image') ? (
                 <img src={qrString} alt="QR Code" style={{ maxWidth: '300px', height: 'auto' }} />
               ) : (
@@ -363,7 +355,7 @@ function Chatbot() {
                 margin: '0 auto 20px'
               }}></div>
               <p className="qr-instruction" style={{ fontSize: '16px', marginBottom: '8px' }}>
-                ⏳ Aguardando QR String do backend...
+                ⏳ Aguardando QR Code do backend...
               </p>
               <p style={{ fontSize: '13px', color: '#6b7280' }}>
                 Tentativa: {attemptCountRef.current}
