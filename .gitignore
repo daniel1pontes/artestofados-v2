@@ -6,3 +6,7 @@ whatsapp-session/
 *.pdf
 .DS_Store
 
+# Google Calendar Credentials
+api/credentials/
+credentials/
+

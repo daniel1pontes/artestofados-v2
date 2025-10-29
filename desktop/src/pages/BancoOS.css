@@ -1,6 +1,8 @@
 .banco-os-page {
   max-width: 1400px;
   margin: 0 auto;
+  padding: 20px;
+  overflow-x: hidden;
 }
 
 .search-section {
@@ -29,13 +31,15 @@
 .os-table {
   background-color: #ffffff;
   border-radius: 8px;
-  overflow: hidden;
+  overflow-x: auto;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  width: 100%;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
+  min-width: 600px;
 }
 
 thead {
@@ -49,13 +53,25 @@ th {
   font-weight: 600;
   color: #333333;
   border-bottom: 2px solid #e5e7eb;
+  white-space: nowrap;
 }
+
+th:nth-child(1) { width: 60px; }  /* ID */
+th:nth-child(2) { width: 200px; } /* Cliente */
+th:nth-child(3) { width: 120px; } /* Pagamento */
+th:nth-child(4) { width: 140px; } /* Valor Total */
+th:nth-child(5) { width: 120px; } /* Prazo */
+th:nth-child(6) { width: 200px; } /* Ações */
 
 td {
   padding: 12px 16px;
   font-size: 14px;
   color: #666666;
   border-bottom: 1px solid #f3f4f6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
 }
 
 /* Destacar coluna de valor total */
@@ -65,15 +81,24 @@ td:nth-child(4) {
   text-align: left;
 }
 
+/* Coluna de ações não deve ter ellipsis */
+td:nth-child(6) {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  max-width: none;
+}
+
 tbody tr:hover {
   background-color: #f8f9fa;
 }
 
 .action-buttons {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
   flex-wrap: wrap;
+  min-width: 200px;
 }
 
 .btn-view, .btn-download, .btn-delete {
@@ -368,5 +393,137 @@ tbody tr:hover {
 .btn-download-pdf:hover {
   background-color: #218838;
   transform: translateY(-1px);
+}
+
+/* Estilos responsivos */
+@media (max-width: 1200px) {
+  .banco-os-page {
+    padding: 16px;
+  }
+  
+  th, td {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  
+  .action-buttons {
+    gap: 4px;
+    min-width: 180px;
+  }
+  
+  .btn-view, .btn-download, .btn-delete {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 992px) {
+  .banco-os-page {
+    padding: 12px;
+  }
+  
+  th, td {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  
+  .action-buttons {
+    gap: 3px;
+    min-width: 160px;
+  }
+  
+  .btn-view, .btn-download, .btn-delete {
+    padding: 3px 6px;
+    font-size: 10px;
+  }
+  
+  .no-pdf {
+    font-size: 10px;
+    padding: 4px 8px;
+  }
+}
+
+@media (max-width: 768px) {
+  .banco-os-page {
+    padding: 10px;
+  }
+  
+  .os-table {
+    border-radius: 6px;
+  }
+  
+  table {
+    min-width: 500px;
+  }
+  
+  th, td {
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+  
+  .action-buttons {
+    flex-direction: column;
+    gap: 4px;
+    min-width: 120px;
+  }
+  
+  .btn-view, .btn-download, .btn-delete {
+    padding: 6px 8px;
+    font-size: 10px;
+    width: 100%;
+    text-align: center;
+  }
+  
+  .no-pdf {
+    font-size: 9px;
+    padding: 3px 6px;
+    text-align: center;
+  }
+}
+
+@media (max-width: 480px) {
+  .banco-os-page {
+    padding: 8px;
+  }
+  
+  .search-input {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  
+  table {
+    min-width: 450px;
+  }
+  
+  th, td {
+    padding: 4px 6px;
+    font-size: 10px;
+  }
+  
+  .action-buttons {
+    min-width: 100px;
+  }
+  
+  .btn-view, .btn-download, .btn-delete {
+    padding: 4px 6px;
+    font-size: 9px;
+  }
+  
+  .modal-content {
+    max-width: 95vw;
+    margin: 10px;
+  }
+  
+  .modal-header {
+    padding: 16px 20px;
+  }
+  
+  .modal-body {
+    padding: 20px;
+  }
+  
+  .modal-footer {
+    padding: 12px 20px;
+  }
 }
 

@@ -199,10 +199,7 @@ function GerarOS() {
         <div className="form-section">
           <h2>Itens da OS</h2>
           {formData.items.map((item, index) => (
-            <div key={index} className="item-row" style={{
-              gridTemplateColumns: '3fr 1fr 1.2fr 1fr 1.2fr auto',
-              gap: '12px'
-            }}>
+            <div key={index} className="item-row">
               <div className="form-group">
                 <label>Descrição *</label>
                 <input
@@ -262,7 +259,6 @@ function GerarOS() {
                   type="button"
                   onClick={() => removeItem(index)}
                   className="btn-remove"
-                  style={{ marginTop: '24px' }}
                 >
                   ❌
                 </button>
