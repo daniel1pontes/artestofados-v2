@@ -27,14 +27,6 @@ function Chatbot() {
     };
   }, []);
 
-  // Auto-refresh de agendamentos a cada 15s
-  useEffect(() => {
-    const id = setInterval(() => {
-      loadAppointments();
-    }, 15000);
-    return () => clearInterval(id);
-  }, []);
-
   const startQRPolling = () => {
     console.log('🔄 Starting QR polling...');
     attemptCountRef.current = 0;
