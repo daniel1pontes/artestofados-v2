@@ -2,7 +2,8 @@ const {
   createCalendarEventWithValidation, 
   checkTimeSlotAvailability, 
   suggestAlternativeTimes,
-  isWithinWorkingHours 
+  isWithinWorkingHours,
+  createCalendarEvent  // ✅ ADICIONAR ESTA IMPORTAÇÃO
 } = require('../config/google-calendar');
 const { createAppointment, findConflicts } = require('../models/agendamento');
 
@@ -20,7 +21,6 @@ function parseBrazilDateTime(input) {
   const str = String(input);
   const hasTz = /[zZ]|[+-]\d{2}:?\d{2}$/.test(str);
   if (hasTz) return new Date(str);
-  // Expect formats like YYYY-MM-DDTHH:mm or YYYY-MM-DD HH:mm
   const m = str.trim().replace(' ', 'T').match(/^(\d{4})-(\d{2})-(\d{2})[T](\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (!m) return new Date(str);
   const y = parseInt(m[1], 10);
@@ -29,12 +29,10 @@ function parseBrazilDateTime(input) {
   const h = parseInt(m[4], 10);
   const mi = parseInt(m[5], 10);
   const s = m[6] ? parseInt(m[6], 10) : 0;
-  // America/Sao_Paulo is UTC-03:00 (no DST currently)
   return new Date(Date.UTC(y, mo, d, h + 3, mi, s));
 }
 
 const calendarController = {
-  // Verificar disponibilidade de um horário específico
   async checkAvailability(req, res) {
     try {
       const { startTime, endTime, agendaType, calendarId } = req.body;
@@ -48,14 +46,12 @@ const calendarController = {
       const start = parseBrazilDateTime(startTime);
       const end = parseBrazilDateTime(endTime);
 
-      // Validar se as datas são válidas
       if (isNaN(start.getTime()) || isNaN(end.getTime())) {
         return res.status(400).json({ 
           error: 'Datas inválidas' 
         });
       }
 
-      // Verificar se está dentro do horário de trabalho
       if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
         return res.status(400).json({ 
           error: 'Horário fora do expediente de trabalho (8h às 18h, segunda a sexta)',
@@ -63,7 +59,6 @@ const calendarController = {
         });
       }
 
-      // Verificar disponibilidade apenas no banco (conflitos por mesmo tipo)
       const dbConflicts = await findConflicts(start, end, normalizeAgendaType(agendaType));
 
       res.json({
@@ -81,7 +76,6 @@ const calendarController = {
     }
   },
 
-  // Sugerir horários alternativos
   async suggestTimes(req, res) {
     try {
       const { requestedTime, duration = 60, agendaType, calendarId } = req.body;
@@ -121,7 +115,6 @@ const calendarController = {
     }
   },
 
-  // Criar evento com validação
   async createEvent(req, res) {
     try {
       const { summary, description, startTime, endTime, duration = 60, agendaType, calendarId, clientName } = req.body;
@@ -138,18 +131,15 @@ const calendarController = {
       if (endTime) {
         end = parseBrazilDateTime(endTime);
       } else {
-        // Se não fornecido, calcular baseado na duração
         end = new Date(start.getTime() + duration * 60000);
       }
 
-      // Validar se as datas são válidas
       if (isNaN(start.getTime()) || isNaN(end.getTime())) {
         return res.status(400).json({ 
           error: 'Datas inválidas' 
         });
       }
 
-      // Checar conflitos no banco (mesmo tipo)
       const normalizedType = normalizeAgendaType(agendaType);
       const dbConflicts = await findConflicts(start, end, normalizedType);
       if (dbConflicts.length > 0) {
@@ -162,33 +152,67 @@ const calendarController = {
         ? `Atendimento - Reunião Online${clientName ? ` | ${clientName}` : ''}`
         : `Atendimento - Visita à Loja${clientName ? ` | ${clientName}` : ''}`);
 
-      // Salvar no banco (sem criar evento no Google Calendar)
+      const autoDescription = description || 
+        `Cliente: ${clientName || ''}\nTipo: ${normalizedType === 'online' ? 'Reunião Online' : 'Visita à Loja'}`;
+
+      // ✅ CRIAR NO GOOGLE CALENDAR PRIMEIRO
+      console.log('📅 Criando evento no Google Calendar...');
+      let calendarEvent = null;
+      let calendarEventId = null;
+      let htmlLink = null;
+
+      try {
+        calendarEvent = await createCalendarEvent(
+          autoSummary,
+          autoDescription,
+          start,
+          end,
+          { agendaType: normalizedType, clientName, calendarId }
+        );
+        
+        calendarEventId = calendarEvent.id;
+        htmlLink = calendarEvent.htmlLink;
+        
+        console.log('✅ Evento criado no Google Calendar:', calendarEventId);
+        console.log('🔗 Link:', htmlLink);
+      } catch (calendarError) {
+        console.error('❌ Erro ao criar no Google Calendar:', calendarError.message);
+        // Se falhar no Google Calendar, não salvar no banco
+        return res.status(500).json({
+          error: 'Erro ao criar evento no Google Calendar',
+          details: calendarError.message
+        });
+      }
+
+      // ✅ SALVAR NO BANCO APENAS SE GOOGLE CALENDAR FUNCIONAR
+      console.log('💾 Salvando no banco de dados...');
       await createAppointment({
-        calendarEventId: null,
+        calendarEventId,  // ✅ AGORA TEM O ID DO GOOGLE CALENDAR
         summary: autoSummary,
-        description: description || '',
+        description: autoDescription,
         startTime: start,
         endTime: end,
         agendaType: normalizedType,
         clientName: clientName || null,
       });
 
+      console.log('✅ Salvo no banco de dados');
+
       res.json({
         success: true,
         event: {
-          id: null,
+          id: calendarEventId,
           summary: autoSummary,
           start: start.toISOString(),
           end: end.toISOString(),
-          htmlLink: null
+          htmlLink: htmlLink
         },
-        message: 'Evento criado com sucesso'
+        message: 'Evento criado com sucesso no Google Calendar e banco de dados'
       });
 
     } catch (error) {
       console.error('Error creating event:', error);
       
-      // Se for erro de disponibilidade, retornar sugestões
       if (error.message.includes('Horário não disponível')) {
         try {
           const start = new Date(req.body.startTime);
@@ -215,7 +239,6 @@ const calendarController = {
     }
   },
 
-  // Verificar horário de trabalho
   async checkWorkingHours(req, res) {
     try {
       const { dateTime } = req.body;

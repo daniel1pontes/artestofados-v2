@@ -27,23 +27,25 @@ function getCalendarIdByType(agendaType) {
   return 'primary';
 }
 
-function getAuthClient() {
-  if (!authClient) {
-    const keyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-    
-    if (!keyPath) {
-      console.warn('Google Calendar credentials not configured');
-      return null;
-    }
+async function getAuthClient() {
+  if (authClient) return authClient;
 
-    authClient = new google.auth.GoogleAuth({
-      keyFile: keyPath,
-      scopes: ['https://www.googleapis.com/auth/calendar'],
-    });
+  const keyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (!keyPath) {
+    console.warn('⚠️ GOOGLE_SERVICE_ACCOUNT_KEY não configurado.');
+    return null;
   }
 
+  const auth = new google.auth.GoogleAuth({
+    keyFile: keyPath,
+    scopes: ['https://www.googleapis.com/auth/calendar'],
+  });
+
+  // 🔥 Pega o client autenticado de fato
+  authClient = await auth.getClient();
   return authClient;
 }
+
 
 // Função para verificar se um horário está dentro do horário de trabalho baseado em America/Sao_Paulo
 function isWithinWorkingHours(dateTime) {
@@ -63,7 +65,7 @@ function isWithinWorkingHours(dateTime) {
 // Função para verificar conflitos de horário
 async function checkTimeSlotAvailability(startTime, endTime, options = {}) {
   try {
-    const auth = getAuthClient();
+    const auth = await getAuthClient();
     
     if (!auth) {
       throw new Error('Google Calendar not configured');
@@ -121,7 +123,7 @@ async function checkTimeSlotAvailability(startTime, endTime, options = {}) {
 // Função para sugerir horários alternativos
 async function suggestAlternativeTimes(requestedStartTime, durationMinutes = DEFAULT_MEETING_DURATION, options = {}) {
   try {
-    const auth = getAuthClient();
+    const auth = await getAuthClient();
     
     if (!auth) {
       throw new Error('Google Calendar not configured');
@@ -225,7 +227,7 @@ async function createCalendarEventWithValidation(summary, description, startTime
 
 async function createCalendarEvent(summary, description, startTime, endTime, options = {}) {
   try {
-    const auth = getAuthClient();
+    const auth = await getAuthClient();
     
     if (!auth) {
       throw new Error('Google Calendar not configured');
