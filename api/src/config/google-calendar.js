@@ -13,6 +13,20 @@ const WORK_HOURS = {
 // Duração padrão das reuniões (1 hora)
 const DEFAULT_MEETING_DURATION = 60; // em minutos
 
+// Mapeamento de agendas paralelas
+// Defina as variáveis de ambiente:
+//  - GOOGLE_CALENDAR_ID_ONLINE
+//  - GOOGLE_CALENDAR_ID_LOJA
+// Caso não definidas, usa 'primary'
+function getCalendarIdByType(agendaType) {
+  const normalized = String(agendaType || '').toLowerCase();
+  if (normalized === 'online') return process.env.GOOGLE_CALENDAR_ID_ONLINE || 'primary';
+  if (normalized === 'loja' || normalized === 'visita' || normalized === 'presencial') {
+    return process.env.GOOGLE_CALENDAR_ID_LOJA || 'primary';
+  }
+  return 'primary';
+}
+
 function getAuthClient() {
   if (!authClient) {
     const keyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
@@ -31,19 +45,23 @@ function getAuthClient() {
   return authClient;
 }
 
-// Função para verificar se um horário está dentro do horário de trabalho
+// Função para verificar se um horário está dentro do horário de trabalho baseado em America/Sao_Paulo
 function isWithinWorkingHours(dateTime) {
   const date = new Date(dateTime);
-  const dayOfWeek = date.getDay(); // 0 = domingo, 1 = segunda, etc.
-  const hour = date.getHours();
-  
-  return WORK_HOURS.workingDays.includes(dayOfWeek) && 
-         hour >= WORK_HOURS.start && 
-         hour < WORK_HOURS.end;
+  const fmt = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour12: false, weekday: 'short', hour: '2-digit' });
+  const parts = fmt.formatToParts(date);
+  const hourPart = parts.find(p => p.type === 'hour');
+  const weekdayPart = parts.find(p => p.type === 'weekday');
+  const hour = hourPart ? parseInt(hourPart.value, 10) : date.getUTCHours();
+  // Mapear weekday pt-BR curto para número (0=domingo)
+  const weekdayMap = { 'dom': 0, 'seg': 1, 'ter': 2, 'qua': 3, 'qui': 4, 'sex': 5, 'sáb': 6, 'sab': 6 };
+  const dow = weekdayMap[(weekdayPart?.value || '').toLowerCase()] ?? date.getUTCDay();
+
+  return WORK_HOURS.workingDays.includes(dow) && hour >= WORK_HOURS.start && hour < WORK_HOURS.end;
 }
 
 // Função para verificar conflitos de horário
-async function checkTimeSlotAvailability(startTime, endTime) {
+async function checkTimeSlotAvailability(startTime, endTime, options = {}) {
   try {
     const auth = getAuthClient();
     
@@ -53,9 +71,11 @@ async function checkTimeSlotAvailability(startTime, endTime) {
 
     const calendar = google.calendar({ version: 'v3', auth });
 
+    const calendarId = options.calendarId || getCalendarIdByType(options.agendaType);
+
     // Buscar eventos no período
     const response = await calendar.events.list({
-      calendarId: 'primary',
+      calendarId: calendarId || 'primary',
       timeMin: startTime.toISOString(),
       timeMax: endTime.toISOString(),
       singleEvents: true,
@@ -63,14 +83,20 @@ async function checkTimeSlotAvailability(startTime, endTime) {
     });
 
     const events = response.data.items || [];
-    
-    // Verificar se há conflitos
+
+    const requestedType = String(options.agendaType || '').toLowerCase();
+
+    // Verificar se há conflitos apenas com o MESMO tipo de agenda
     const hasConflict = events.some(event => {
       const eventStart = new Date(event.start.dateTime || event.start.date);
       const eventEnd = new Date(event.end.dateTime || event.end.date);
-      
-      // Verificar sobreposição de horários
-      return (startTime < eventEnd && endTime > eventStart);
+      const eventType = event.extendedProperties?.private?.agendaType?.toLowerCase() || '';
+      const overlaps = (startTime < eventEnd && endTime > eventStart);
+      if (!overlaps) return false;
+      if (!requestedType) return true; // sem tipo informado, considerar conflito
+      // Se o evento existente não tem tipo salvo, considerar conflito para qualquer tipo solicitado
+      if (!eventType) return true;
+      return eventType === requestedType; // conflito só se mesmo tipo
     });
 
     return {
@@ -78,7 +104,12 @@ async function checkTimeSlotAvailability(startTime, endTime) {
       conflicts: events.filter(event => {
         const eventStart = new Date(event.start.dateTime || event.start.date);
         const eventEnd = new Date(event.end.dateTime || event.end.date);
-        return (startTime < eventEnd && endTime > eventStart);
+        const eventType = event.extendedProperties?.private?.agendaType?.toLowerCase() || '';
+        const overlaps = (startTime < eventEnd && endTime > eventStart);
+        if (!overlaps) return false;
+        if (!requestedType) return true;
+        if (!eventType) return true;
+        return eventType === requestedType;
       })
     };
   } catch (error) {
@@ -88,7 +119,7 @@ async function checkTimeSlotAvailability(startTime, endTime) {
 }
 
 // Função para sugerir horários alternativos
-async function suggestAlternativeTimes(requestedStartTime, durationMinutes = DEFAULT_MEETING_DURATION) {
+async function suggestAlternativeTimes(requestedStartTime, durationMinutes = DEFAULT_MEETING_DURATION, options = {}) {
   try {
     const auth = getAuthClient();
     
@@ -98,6 +129,7 @@ async function suggestAlternativeTimes(requestedStartTime, durationMinutes = DEF
 
     const calendar = google.calendar({ version: 'v3', auth });
     const suggestions = [];
+    const calendarId = options.calendarId || getCalendarIdByType(options.agendaType);
     
     // Buscar eventos do dia
     const startOfDay = new Date(requestedStartTime);
@@ -107,7 +139,7 @@ async function suggestAlternativeTimes(requestedStartTime, durationMinutes = DEF
     endOfDay.setHours(23, 59, 59, 999);
 
     const response = await calendar.events.list({
-      calendarId: 'primary',
+      calendarId: calendarId || 'primary',
       timeMin: startOfDay.toISOString(),
       timeMax: endOfDay.toISOString(),
       singleEvents: true,
@@ -115,6 +147,7 @@ async function suggestAlternativeTimes(requestedStartTime, durationMinutes = DEF
     });
 
     const events = response.data.items || [];
+    const requestedType = String(options.agendaType || '').toLowerCase();
     
     // Gerar sugestões de horários livres
     const workStart = new Date(requestedStartTime);
@@ -129,11 +162,16 @@ async function suggestAlternativeTimes(requestedStartTime, durationMinutes = DEF
       
       if (slotEnd > workEnd) break;
       
-      // Verificar se o horário está livre
+      // Verificar se o horário está livre para o MESMO tipo de agenda
       const hasConflict = events.some(event => {
         const eventStart = new Date(event.start.dateTime || event.start.date);
         const eventEnd = new Date(event.end.dateTime || event.end.date);
-        return (time < eventEnd && slotEnd > eventStart);
+        const eventType = event.extendedProperties?.private?.agendaType?.toLowerCase() || '';
+        const overlaps = (time < eventEnd && slotEnd > eventStart);
+        if (!overlaps) return false;
+        if (!requestedType) return true; // sem tipo, considerar ocupado
+        if (!eventType) return true; // sem tipo salvo, considerar ocupado
+        return eventType === requestedType;
       });
 
       if (!hasConflict) {
@@ -168,16 +206,16 @@ async function createCalendarEventWithValidation(summary, description, startTime
     }
 
     // Verificar disponibilidade
-    const availability = await checkTimeSlotAvailability(startTime, endTime);
+    const availability = await checkTimeSlotAvailability(startTime, endTime, options);
     
     if (!availability.available) {
-      const suggestions = await suggestAlternativeTimes(startTime, options.durationMinutes);
+      const suggestions = await suggestAlternativeTimes(startTime, options.durationMinutes, options);
       
       throw new Error(`Horário não disponível. Conflitos encontrados: ${availability.conflicts.length}. Sugestões de horários alternativos: ${suggestions.length} opções disponíveis.`);
     }
 
     // Criar o evento
-    return await createCalendarEvent(summary, description, startTime, endTime);
+    return await createCalendarEvent(summary, description, startTime, endTime, options);
     
   } catch (error) {
     console.error('Error creating calendar event with validation:', error);
@@ -185,7 +223,7 @@ async function createCalendarEventWithValidation(summary, description, startTime
   }
 }
 
-async function createCalendarEvent(summary, description, startTime, endTime) {
+async function createCalendarEvent(summary, description, startTime, endTime, options = {}) {
   try {
     const auth = getAuthClient();
     
@@ -194,6 +232,7 @@ async function createCalendarEvent(summary, description, startTime, endTime) {
     }
 
     const calendar = google.calendar({ version: 'v3', auth });
+    const calendarId = options.calendarId || getCalendarIdByType(options.agendaType);
 
     const event = {
       summary,
@@ -206,10 +245,16 @@ async function createCalendarEvent(summary, description, startTime, endTime) {
         dateTime: endTime.toISOString(),
         timeZone: 'America/Sao_Paulo',
       },
+      extendedProperties: {
+        private: {
+          agendaType: String(options.agendaType || ''),
+          clientName: String(options.clientName || ''),
+        }
+      }
     };
 
     const response = await calendar.events.insert({
-      calendarId: 'primary',
+      calendarId: calendarId || 'primary',
       resource: event,
     });
 
@@ -226,5 +271,6 @@ module.exports = {
   checkTimeSlotAvailability,
   suggestAlternativeTimes,
   isWithinWorkingHours,
+  getAuthClient,
 };
 

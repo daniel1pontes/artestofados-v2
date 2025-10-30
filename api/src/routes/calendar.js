@@ -10,12 +10,11 @@ const router = express.Router();
  *     CalendarEvent:
  *       type: object
  *       required:
- *         - summary
  *         - startTime
  *       properties:
  *         summary:
  *           type: string
- *           description: Título do evento
+ *           description: Título do evento (opcional; será gerado se ausente)
  *         description:
  *           type: string
  *           description: Descrição do evento
@@ -30,6 +29,16 @@ const router = express.Router();
  *         duration:
  *           type: integer
  *           description: Duração em minutos (padrão 60)
+ *         agendaType:
+ *           type: string
+ *           enum: [online, loja]
+ *           description: Qual agenda utilizar (reunião online ou visita à loja)
+ *         calendarId:
+ *           type: string
+ *           description: ID explícito do calendário (sobrepõe agendaType)
+ *         clientName:
+ *           type: string
+ *           description: Nome do cliente (incluso no resumo automaticamente)
  *     AvailabilityCheck:
  *       type: object
  *       required:
@@ -44,6 +53,13 @@ const router = express.Router();
  *           type: string
  *           format: date-time
  *           description: Data e hora de término
+ *         agendaType:
+ *           type: string
+ *           enum: [online, loja]
+ *           description: Qual agenda utilizar
+ *         calendarId:
+ *           type: string
+ *           description: ID explícito do calendário (sobrepõe agendaType)
  *     TimeSuggestion:
  *       type: object
  *       required:
@@ -56,6 +72,13 @@ const router = express.Router();
  *         duration:
  *           type: integer
  *           description: Duração em minutos (padrão 60)
+ *         agendaType:
+ *           type: string
+ *           enum: [online, loja]
+ *           description: Qual agenda utilizar
+ *         calendarId:
+ *           type: string
+ *           description: ID explícito do calendário (sobrepõe agendaType)
  */
 
 /**

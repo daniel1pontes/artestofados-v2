@@ -3,6 +3,10 @@ const pool = require('../config/database');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const {
+  createCalendarEventWithValidation,
+} = require('../config/google-calendar');
+const { createAppointment } = require('../models/agendamento');
 
 let client = null;
 let qrString = '';
@@ -299,11 +303,12 @@ async function markChatAsHumanHandled(phoneNumber) {
 
 async function saveMessage(messageId, fromNumber, body, timestamp) {
   try {
+    const tsMs = typeof timestamp === 'number' ? (timestamp * 1000) : Date.now();
     await pool.query(
       `INSERT INTO messages (id, from_number, body, timestamp, created_at)
        VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (id) DO NOTHING`,
-      [messageId, fromNumber, body, new Date(timestamp * 1000)]
+      [messageId, fromNumber, body, tsMs]
     );
   } catch (error) {
     console.error('❌ Error saving message:', error);
@@ -327,6 +332,45 @@ async function processChatbotMessage(msg) {
     
     console.log('🧠 Generating chatbot response...');
     const response = await generateChatbotResponse(msg.body, state, contact);
+
+    // Tentar agendar automaticamente se mensagem tiver data/horário e tipo
+    const schedulingResult = await tryScheduleFromMessage(msg.body, state.metadata, contact, fromNumber);
+    if (schedulingResult?.scheduled) {
+    // Tentar cancelar/remarcar pelo texto
+    const cancelResult = await tryCancelOrRescheduleFromMessage(msg.body, fromNumber);
+    if (cancelResult?.changed) {
+      const confirmation = cancelResult.type === 'cancel'
+        ? `✅ Agendamento cancelado: ${cancelResult.humanReadable}`
+        : `✅ Agendamento remarcado: ${cancelResult.humanReadable}`;
+      response.response = `${confirmation}\n\n${response.response}`;
+    } else if (schedulingResult && schedulingResult.scheduled === false) {
+      // Mensagem determinística de indisponibilidade (não deixar o LLM confirmar acidentalmente)
+      const header = schedulingResult.reason === 'outside_hours'
+        ? '⌛ Infelizmente este horário está fora do nosso expediente (8h às 18h, seg a sex).'
+        : '⚠️ Este horário já está ocupado para esta modalidade.';
+      const sugg = (schedulingResult.suggestions || [])
+        .slice(0, 2)
+        .map(s => `• ${s.formatted}`)
+        .join('\n');
+
+      const suggAlt = (schedulingResult.suggestions || [])
+        .slice(0, 2)
+        .map(s => `• ${s.formatted}`)
+        .join('\n');
+
+      const suggestionsText = sugg ? `\n\nSugestões disponíveis:\n${sugg}` : '';
+      response.response = `${header}${suggestionsText}\n\nPosso reservar um desses horários para você?`;
+    }
+      // Mensagem determinística de confirmação (evita contradição do LLM)
+      const confirmation = `✅ Agendamento confirmado: ${schedulingResult.humanReadable}\nLink: ${schedulingResult.htmlLink || '—'}`;
+      const followup = '\n\nSe precisar alterar ou cancelar, me avise por aqui. 👍';
+      response.response = `${confirmation}${followup}`;
+      // Persistiremos metadados após enviar a resposta (já abaixo)
+      response.metadata = {
+        ...response.metadata,
+        lastScheduledEvent: schedulingResult.eventPublic,
+      };
+    }
     
     if (response) {
       console.log('✅ Response generated:', response.response.substring(0, 100) + '...');
@@ -582,6 +626,285 @@ async function sendMessage(phoneNumber, response) {
   } catch (error) {
     console.error('❌ Error sending message:', error);
     throw error;
+  }
+}
+
+// ===== Helpers de agendamento pelo texto =====
+function inferAgendaTypeFromText(text, fallback) {
+  const t = (text || '').toLowerCase();
+  if (t.includes('online') || t.includes('vídeo') || t.includes('video') || t.includes('reuni')) return 'online';
+  if (t.includes('loja') || t.includes('visita') || t.includes('presenc')) return 'loja';
+  return fallback || '';
+}
+
+function buildBrazilDate(year, monthIndex, day, hour = 0, minute = 0, second = 0, ms = 0) {
+  // Constrói um Date correspondente ao horário informado em America/Sao_Paulo
+  return new Date(Date.UTC(year, monthIndex, day, hour + 3, minute, second, ms));
+}
+
+function parseDateTimeFromText(text) {
+  if (!text) return null;
+  const t = text.toLowerCase().trim();
+  const now = new Date();
+
+  function normalizeHourMinute(hhStr, mmStr) {
+    const hour = Math.max(0, Math.min(23, parseInt(hhStr, 10)));
+    const minute = mmStr != null ? Math.max(0, Math.min(59, parseInt(mmStr, 10))) : 0;
+    return { hour, minute };
+  }
+
+  function nextWeekdayDate(targetDow, ref) {
+    const d = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
+    const currentDow = d.getDay();
+    let add = (targetDow - currentDow + 7) % 7;
+    if (add === 0) add = 7; // próximo dia útil igual, não hoje
+    d.setDate(d.getDate() + add);
+    return d;
+  }
+
+  // 1) Expressões relativas: hoje, amanhã, depois de amanhã
+  let baseDate = null;
+  if (/(\b)hoje(\b)/.test(t)) {
+    baseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (/(amanh[ãa]|amanha)/.test(t)) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    d.setDate(d.getDate() + 1);
+    baseDate = d;
+  } else if (/depois\s+de\s+amanh[ãa]/.test(t)) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    d.setDate(d.getDate() + 2);
+    baseDate = d;
+  }
+
+  // 2) Dias da semana
+  const weekdayMap = {
+    'domingo': 0,
+    'segunda': 1, 'segunda-feira': 1,
+    'terca': 2, 'terça': 2, 'terca-feira': 2, 'terça-feira': 2,
+    'quarta': 3, 'quarta-feira': 3,
+    'quinta': 4, 'quinta-feira': 4,
+    'sexta': 5, 'sexta-feira': 5,
+    'sabado': 6, 'sábado': 6,
+  };
+  if (!baseDate) {
+    for (const key of Object.keys(weekdayMap)) {
+      if (t.includes(key)) {
+        baseDate = nextWeekdayDate(weekdayMap[key], now);
+        break;
+      }
+    }
+  }
+
+  // 3) Data explícita: dd/mm/yyyy ou dd/mm
+  let explicitDate = null;
+  let m = t.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+  if (m) {
+    const [_, dd, mm, yyyy] = m;
+    explicitDate = new Date(parseInt(yyyy, 10), parseInt(mm, 10) - 1, parseInt(dd, 10));
+  } else {
+    m = t.match(/\b(\d{1,2})\/(\d{1,2})\b/);
+    if (m) {
+      const [_, dd, mm] = m;
+      explicitDate = new Date(now.getFullYear(), parseInt(mm, 10) - 1, parseInt(dd, 10));
+    }
+  }
+
+  // 4) Hora: "às 14h30", "14:00", "14h", "as 9h", "10hs"
+  let timeMatch = t.match(/(?:\bàs|\bas)?\s*(\d{1,2})(?::(\d{2}))?\s*(h|hs)?\b/);
+  let hour = null, minute = null;
+  if (timeMatch) {
+    const { hour: h, minute: mnt } = normalizeHourMinute(timeMatch[1], timeMatch[2]);
+    hour = h; minute = mnt;
+  }
+
+  // Prioridade: data explícita > base relativa/dia da semana > hoje
+  const dateBase = explicitDate || baseDate || new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (!dateBase) return null;
+
+  const finalHour = hour != null ? hour : 0;
+  const finalMinute = minute != null ? minute : 0;
+  const finalDate = buildBrazilDate(
+    dateBase.getFullYear(),
+    dateBase.getMonth(),
+    dateBase.getDate(),
+    finalHour,
+    finalMinute,
+    0,
+    0
+  );
+
+  if (isNaN(finalDate.getTime())) return null;
+  return finalDate;
+}
+
+async function tryCancelOrRescheduleFromMessage(message, phoneNumber) {
+  try {
+    const t = (message || '').toLowerCase();
+    const wantsCancel = t.includes('cancelar') || t.includes('cancela') || t.includes('desmarcar');
+    const wantsReschedule = t.includes('remarcar') || t.includes('remarca') || t.includes('alterar') || t.includes('mudar horário') || t.includes('mudar horario');
+    if (!wantsCancel && !wantsReschedule) return null;
+
+    const { findLatestByPhone, findConflicts } = require('../models/agendamento');
+    const latest = await findLatestByPhone(phoneNumber);
+    if (!latest) return null;
+
+    const start = new Date(latest.start_time);
+    const end = new Date(latest.end_time);
+    const humanBase = `${latest.summary} em ${start.toLocaleString('pt-BR')} - ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+
+    if (wantsCancel) {
+      try {
+        if (latest.calendar_event_id) {
+          const { getAuthClient } = require('../config/google-calendar');
+          const auth = getAuthClient();
+          const calendar = require('googleapis').google.calendar({ version: 'v3', auth });
+          await calendar.events.delete({ calendarId: 'primary', eventId: latest.calendar_event_id });
+        }
+      } catch (err) {
+        console.error('⚠️ Could not delete calendar event:', err.message);
+      }
+      await pool.query('DELETE FROM appointments WHERE id = $1', [latest.id]);
+      return { changed: true, type: 'cancel', humanReadable: humanBase };
+    }
+
+    if (wantsReschedule) {
+      const newDate = parseDateTimeFromText(message);
+      if (!newDate) return null;
+      const duration = end.getTime() - start.getTime();
+      const newEnd = new Date(newDate.getTime() + duration);
+
+      const conflicts = await findConflicts(newDate, newEnd, latest.agenda_type);
+      const conflictsFiltered = conflicts.filter(c => c.id !== latest.id);
+      if (conflictsFiltered.length > 0) return null;
+
+      if (latest.calendar_event_id) {
+        try {
+          const { getAuthClient } = require('../config/google-calendar');
+          const auth = getAuthClient();
+          const calendar = require('googleapis').google.calendar({ version: 'v3', auth });
+          await calendar.events.patch({
+            calendarId: 'primary',
+            eventId: latest.calendar_event_id,
+            resource: {
+              start: { dateTime: newDate.toISOString(), timeZone: 'America/Sao_Paulo' },
+              end: { dateTime: newEnd.toISOString(), timeZone: 'America/Sao_Paulo' },
+            }
+          });
+        } catch (err) {
+          console.error('⚠️ Could not patch calendar event:', err.message);
+        }
+      }
+
+      await pool.query(
+        `UPDATE appointments SET start_time = $2, end_time = $3, updated_at = NOW() WHERE id = $1`,
+        [latest.id, newDate, newEnd]
+      );
+
+      const humanNew = `${latest.summary} em ${newDate.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${newEnd.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`;
+      return { changed: true, type: 'reschedule', humanReadable: humanNew };
+    }
+
+    return null;
+  } catch (err) {
+    console.error('❌ Cancel/Reschedule parse failed:', err.message);
+    return null;
+  }
+}
+
+async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
+  try {
+    const customerName = contact.pushname || contact.name || '';
+    const rawType = inferAgendaTypeFromText(message, metadata?.agendaType);
+    const agendaType = (rawType === 'visita' || rawType === 'presencial') ? 'loja' : rawType;
+    const start = parseDateTimeFromText(message);
+    if (!agendaType || !start) return null;
+
+    const duration = 60;
+    const end = new Date(start.getTime() + duration * 60000);
+
+    // Validar expediente (8-18h, dias úteis) em America/Sao_Paulo
+    const { isWithinWorkingHours, suggestAlternativeTimes } = require('../config/google-calendar');
+    if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
+      let suggestions = [];
+      try {
+        suggestions = await suggestAlternativeTimes(start, duration, { agendaType });
+      } catch (e) {
+        suggestions = [];
+      }
+      return {
+        scheduled: false,
+        reason: 'outside_hours',
+        suggestions: suggestions.map(s => ({
+          start: s.start,
+          end: s.end,
+          formatted: `${s.start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${s.end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`
+        }))
+      };
+    }
+
+    const autoSummary = agendaType === 'online'
+      ? `Atendimento - Reunião Online${customerName ? ` | ${customerName}` : ''}`
+      : `Atendimento - Visita à Loja${customerName ? ` | ${customerName}` : ''}`;
+
+    // Verificar conflitos no banco (mesmo tipo)
+    const { findConflicts } = require('../models/agendamento');
+    const dbConflicts = await findConflicts(start, end, agendaType);
+    if (dbConflicts.length > 0) {
+      let suggestions = [];
+      try {
+        suggestions = await suggestAlternativeTimes(start, duration, { agendaType });
+      } catch (e) {
+        suggestions = [];
+      }
+      return {
+        scheduled: false,
+        reason: 'conflict',
+        suggestions: suggestions.map(s => ({
+          start: s.start,
+          end: s.end,
+          formatted: `${s.start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${s.end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`
+        }))
+      };
+    }
+
+    // Persistir no banco (sem criar evento no Google Calendar) e somente confirmar se salvar com sucesso
+    try {
+      await createAppointment({
+        calendarEventId: null,
+        summary: autoSummary,
+        description: '',
+        startTime: start,
+        endTime: end,
+        agendaType,
+        clientName: customerName || null,
+        phoneNumber: phoneNumber || null,
+      });
+      const humanReadable = `${agendaType === 'online' ? 'Reunião online' : 'Visita à loja'} em ${start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`;
+      return {
+        scheduled: true,
+        humanReadable,
+        htmlLink: undefined,
+        eventPublic: {
+          id: undefined,
+          summary: autoSummary,
+          start: start.toISOString(),
+          end: end.toISOString(),
+          agendaType,
+          htmlLink: undefined,
+        }
+      };
+    } catch (persistErr) {
+      console.error('⚠️ Could not persist appointment:', persistErr.message);
+      const reason = String(persistErr.message || '').includes('conflict') ? 'conflict' : 'persist_error';
+      return {
+        scheduled: false,
+        reason,
+        suggestions: []
+      };
+    }
+  } catch (err) {
+    console.error('❌ Scheduling from message failed:', err.message);
+    return { scheduled: false, reason: 'error', suggestions: [] };
   }
 }
 

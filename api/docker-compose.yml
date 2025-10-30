@@ -26,7 +26,7 @@ services:
       DB_NAME: osdb
       DB_USER: postgres
       DB_PASSWORD: postgres
-      GOOGLE_SERVICE_ACCOUNT_KEY: ./credentials/google-service-account.json
+      GOOGLE_SERVICE_ACCOUNT_KEY: /app/credentials/google-service-account.json
     depends_on:
       db:
         condition: service_healthy

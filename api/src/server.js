@@ -8,6 +8,8 @@ require('dotenv').config();
 const chatbotRoutes = require('./routes/chatbot');
 const osRoutes = require('./routes/os');
 const calendarRoutes = require('./routes/calendar');
+const appointmentsRoutes = require('./routes/appointments');
+const agendamentosRoutes = require('./routes/agendamentos');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,6 +52,12 @@ app.use('/os', osRoutes);
 console.log('✅ OS routes configured');
 app.use('/api/calendar', calendarRoutes);
 console.log('✅ Calendar routes configured');
+app.use('/api/appointments', appointmentsRoutes);
+// Alias extra para compatibilidade (se front apontar sem /api)
+app.use('/appointments', appointmentsRoutes);
+console.log('✅ Appointments routes configured');
+app.use('/api/agendamentos', agendamentosRoutes);
+console.log('✅ Agendamentos routes configured');
 
 // Health check
 app.get('/health', (req, res) => {

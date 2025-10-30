@@ -83,4 +83,28 @@ export const osAPI = {
   },
 };
 
+// Appointments API
+export const appointmentsAPI = {
+  listar: async () => {
+    const response = await api.get('/api/appointments');
+    return response.data;
+  },
+  atualizar: async (id, data) => {
+    const response = await api.patch(`/api/appointments/${id}`, data);
+    return response.data;
+  },
+  deletar: async (id) => {
+    const response = await api.delete(`/api/appointments/${id}`);
+    return response.data;
+  },
+};
+
+// Agendamentos API (mapeado conforme especificação)
+export const agendamentosAPI = {
+  listar: async (params = {}) => {
+    const response = await api.get('/api/agendamentos', { params });
+    return response.data;
+  },
+};
+
 export default api;

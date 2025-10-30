@@ -4,12 +4,40 @@ const {
   suggestAlternativeTimes,
   isWithinWorkingHours 
 } = require('../config/google-calendar');
+const { createAppointment, findConflicts } = require('../models/agendamento');
+
+function normalizeAgendaType(type) {
+  const t = String(type || '').toLowerCase();
+  if (t === 'reuniao' || t === 'online') return 'online';
+  if (t === 'visita' || t === 'presencial' || t === 'loja') return 'loja';
+  return t;
+}
+
+function parseBrazilDateTime(input) {
+  if (!input) return null;
+  if (input instanceof Date) return input;
+  if (typeof input === 'number') return new Date(input);
+  const str = String(input);
+  const hasTz = /[zZ]|[+-]\d{2}:?\d{2}$/.test(str);
+  if (hasTz) return new Date(str);
+  // Expect formats like YYYY-MM-DDTHH:mm or YYYY-MM-DD HH:mm
+  const m = str.trim().replace(' ', 'T').match(/^(\d{4})-(\d{2})-(\d{2})[T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return new Date(str);
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10) - 1;
+  const d = parseInt(m[3], 10);
+  const h = parseInt(m[4], 10);
+  const mi = parseInt(m[5], 10);
+  const s = m[6] ? parseInt(m[6], 10) : 0;
+  // America/Sao_Paulo is UTC-03:00 (no DST currently)
+  return new Date(Date.UTC(y, mo, d, h + 3, mi, s));
+}
 
 const calendarController = {
   // Verificar disponibilidade de um horário específico
   async checkAvailability(req, res) {
     try {
-      const { startTime, endTime } = req.body;
+      const { startTime, endTime, agendaType, calendarId } = req.body;
 
       if (!startTime || !endTime) {
         return res.status(400).json({ 
@@ -17,8 +45,8 @@ const calendarController = {
         });
       }
 
-      const start = new Date(startTime);
-      const end = new Date(endTime);
+      const start = parseBrazilDateTime(startTime);
+      const end = parseBrazilDateTime(endTime);
 
       // Validar se as datas são válidas
       if (isNaN(start.getTime()) || isNaN(end.getTime())) {
@@ -35,14 +63,13 @@ const calendarController = {
         });
       }
 
-      const availability = await checkTimeSlotAvailability(start, end);
+      // Verificar disponibilidade apenas no banco (conflitos por mesmo tipo)
+      const dbConflicts = await findConflicts(start, end, normalizeAgendaType(agendaType));
 
       res.json({
-        available: availability.available,
-        conflicts: availability.conflicts.length,
-        message: availability.available 
-          ? 'Horário disponível' 
-          : `Horário não disponível. ${availability.conflicts.length} conflito(s) encontrado(s)`
+        available: dbConflicts.length === 0,
+        conflicts: dbConflicts.length,
+        message: dbConflicts.length === 0 ? 'Horário disponível' : 'Horário não disponível.'
       });
 
     } catch (error) {
@@ -57,7 +84,7 @@ const calendarController = {
   // Sugerir horários alternativos
   async suggestTimes(req, res) {
     try {
-      const { requestedTime, duration = 60 } = req.body;
+      const { requestedTime, duration = 60, agendaType, calendarId } = req.body;
 
       if (!requestedTime) {
         return res.status(400).json({ 
@@ -73,7 +100,7 @@ const calendarController = {
         });
       }
 
-      const suggestions = await suggestAlternativeTimes(requested, duration);
+      const suggestions = await suggestAlternativeTimes(requested, duration, { agendaType, calendarId });
 
       res.json({
         requestedTime: requested.toISOString(),
@@ -97,19 +124,19 @@ const calendarController = {
   // Criar evento com validação
   async createEvent(req, res) {
     try {
-      const { summary, description, startTime, endTime, duration = 60 } = req.body;
+      const { summary, description, startTime, endTime, duration = 60, agendaType, calendarId, clientName } = req.body;
 
-      if (!summary || !startTime) {
+      if (!startTime) {
         return res.status(400).json({ 
-          error: 'summary e startTime são obrigatórios' 
+          error: 'startTime é obrigatório' 
         });
       }
 
-      const start = new Date(startTime);
+      const start = parseBrazilDateTime(startTime);
       let end;
 
       if (endTime) {
-        end = new Date(endTime);
+        end = parseBrazilDateTime(endTime);
       } else {
         // Se não fornecido, calcular baseado na duração
         end = new Date(start.getTime() + duration * 60000);
@@ -122,22 +149,38 @@ const calendarController = {
         });
       }
 
-      const event = await createCalendarEventWithValidation(
-        summary, 
-        description || '', 
-        start, 
-        end, 
-        { durationMinutes: duration }
-      );
+      // Checar conflitos no banco (mesmo tipo)
+      const normalizedType = normalizeAgendaType(agendaType);
+      const dbConflicts = await findConflicts(start, end, normalizedType);
+      if (dbConflicts.length > 0) {
+        return res.status(409).json({
+          error: 'Horário não disponível (conflito no banco para este tipo)'
+        });
+      }
+
+      const autoSummary = summary || (normalizedType === 'online' 
+        ? `Atendimento - Reunião Online${clientName ? ` | ${clientName}` : ''}`
+        : `Atendimento - Visita à Loja${clientName ? ` | ${clientName}` : ''}`);
+
+      // Salvar no banco (sem criar evento no Google Calendar)
+      await createAppointment({
+        calendarEventId: null,
+        summary: autoSummary,
+        description: description || '',
+        startTime: start,
+        endTime: end,
+        agendaType: normalizedType,
+        clientName: clientName || null,
+      });
 
       res.json({
         success: true,
         event: {
-          id: event.id,
-          summary: event.summary,
-          start: event.start.dateTime,
-          end: event.end.dateTime,
-          htmlLink: event.htmlLink
+          id: null,
+          summary: autoSummary,
+          start: start.toISOString(),
+          end: end.toISOString(),
+          htmlLink: null
         },
         message: 'Evento criado com sucesso'
       });
@@ -149,7 +192,7 @@ const calendarController = {
       if (error.message.includes('Horário não disponível')) {
         try {
           const start = new Date(req.body.startTime);
-          const suggestions = await suggestAlternativeTimes(start, req.body.duration || 60);
+          const suggestions = await suggestAlternativeTimes(start, req.body.duration || 60, { agendaType: req.body.agendaType, calendarId: req.body.calendarId });
           
           return res.status(409).json({
             error: 'Horário não disponível',

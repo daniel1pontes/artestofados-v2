@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { chatbotAPI } from '../services/api';
+import { chatbotAPI, appointmentsAPI, agendamentosAPI } from '../services/api';
 import { QRCodeSVG } from 'qrcode.react';
 import './Chatbot.css';
 
@@ -8,17 +8,31 @@ function Chatbot() {
   const [qrString, setQrString] = useState('');
   const [loading, setLoading] = useState(false);
   const [debugInfo, setDebugInfo] = useState('');
+  const [appointments, setAppointments] = useState([]);
+  const [loadingAppointments, setLoadingAppointments] = useState(false);
+  const [appointmentsFilter, setAppointmentsFilter] = useState('all');
+  const [filterDate, setFilterDate] = useState(''); // YYYY-MM-DD
+  const [filterTipo, setFilterTipo] = useState('all'); // all | visita | reuniao
   const pollIntervalRef = useRef(null);
   const attemptCountRef = useRef(0);
 
   useEffect(() => {
     loadStatus();
+    loadAppointments();
     
     return () => {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
       }
     };
+  }, []);
+
+  // Auto-refresh de agendamentos a cada 15s
+  useEffect(() => {
+    const id = setInterval(() => {
+      loadAppointments();
+    }, 15000);
+    return () => clearInterval(id);
   }, []);
 
   const startQRPolling = () => {
@@ -120,6 +134,76 @@ function Chatbot() {
     } catch (error) {
       console.error('❌ Error loading status:', error);
       setDebugInfo(`Erro ao carregar status: ${error.message}`);
+    }
+  };
+
+  const loadAppointments = async () => {
+    try {
+      setLoadingAppointments(true);
+      // Preferir agendamentos mapeados
+      let itemsResp = null;
+      try {
+        const params = {};
+        if (filterDate) {
+          const from = new Date(filterDate + 'T00:00:00');
+          const to = new Date(filterDate + 'T23:59:59');
+          params.from = from.toISOString();
+          params.to = to.toISOString();
+        }
+        if (filterTipo !== 'all') params.tipo = filterTipo;
+        const resp = await agendamentosAPI.listar(params);
+        itemsResp = resp.items;
+      } catch (e) {
+        // fallback
+        const r2 = await appointmentsAPI.listar();
+        itemsResp = r2.items;
+      }
+      const items = itemsResp || [];
+      setAppointments(items || []);
+    } catch (error) {
+      console.error('❌ Error loading appointments:', error);
+    } finally {
+      setLoadingAppointments(false);
+    }
+  };
+
+  const handleDeleteAppointment = async (id) => {
+    if (!window.confirm('Tem certeza que deseja cancelar este agendamento?')) return;
+    try {
+      await appointmentsAPI.deletar(id);
+      await loadAppointments();
+      alert('✅ Agendamento cancelado com sucesso');
+    } catch (error) {
+      alert('Erro ao cancelar: ' + (error.response?.data?.error || error.message));
+    }
+  };
+
+  const handleUpdateAppointment = async (id, current) => {
+    const newDate = prompt('Nova data (dd/mm ou dd/mm/aaaa):', new Date(current.start_time).toLocaleDateString('pt-BR'));
+    if (newDate == null) return;
+    const newTime = prompt('Novo horário (HH:mm):', new Date(current.start_time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }));
+    if (newTime == null) return;
+    const newSummary = prompt('Novo resumo (opcional):', current.summary);
+
+    try {
+      // Parse simples dd/mm(/aaaa) + HH:mm
+      const [d, m, y] = newDate.split('/');
+      const [hh, mm] = newTime.split(':');
+      const base = new Date(current.start_time);
+      const year = y ? parseInt(y, 10) : base.getFullYear();
+      const start = new Date(year, parseInt(m, 10) - 1, parseInt(d, 10), parseInt(hh, 10), parseInt(mm, 10), 0, 0);
+      const durationMs = new Date(current.end_time).getTime() - new Date(current.start_time).getTime();
+      const end = new Date(start.getTime() + durationMs);
+
+      await appointmentsAPI.atualizar(id, {
+        summary: newSummary || undefined,
+        startTime: start.toISOString(),
+        endTime: end.toISOString(),
+      });
+      await loadAppointments();
+      alert('✅ Agendamento atualizado');
+    } catch (error) {
+      alert('Erro ao atualizar: ' + (error.response?.data?.error || error.message));
     }
   };
 
@@ -355,6 +439,98 @@ function Chatbot() {
             </div>
           </div>
         )}
+      </div>
+
+      <div className="appointments-card" style={{ marginTop: '24px' }}>
+        <h2>📅 Agendamentos</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+          <label style={{ fontSize: 13, color: '#374151' }}>Filtro:</label>
+          <select
+            value={appointmentsFilter}
+            onChange={(e) => setAppointmentsFilter(e.target.value)}
+            className="btn"
+            style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}
+          >
+            <option value="all">Todos</option>
+            <option value="next">Próximo</option>
+          </select>
+          <input
+            type="date"
+            value={filterDate}
+            onChange={(e) => setFilterDate(e.target.value)}
+            className="btn"
+            style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}
+          />
+          <select
+            value={filterTipo}
+            onChange={(e) => setFilterTipo(e.target.value)}
+            className="btn"
+            style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}
+          >
+            <option value="all">Todos os tipos</option>
+            <option value="visita">Visita</option>
+            <option value="reuniao">Reunião online</option>
+          </select>
+          <button className="btn btn-secondary" onClick={loadAppointments}>🔄 Atualizar lista</button>
+        </div>
+        {loadingAppointments ? (
+          <p>Carregando agendamentos...</p>
+        ) : (() => {
+          let visible = appointments;
+          if (appointmentsFilter === 'next') {
+            const now = Date.now();
+            const upcoming = appointments
+              .filter(a => new Date(a.data || a.start_time).getTime() >= now)
+              .sort((a, b) => new Date(a.data || a.start_time) - new Date(b.data || b.start_time));
+            visible = upcoming.length > 0 ? [upcoming[0]] : [];
+          }
+          if (visible.length === 0) {
+            return <p>Nenhum agendamento encontrado.</p>;
+          }
+          return (
+            <div className="appointments-list" style={{ marginTop: '12px' }}>
+              {visible.map(item => (
+                <div key={item.id} className="appointment-item" style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '10px 12px',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '8px',
+                  marginBottom: '8px',
+                  background: '#fff'
+                }}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{item.summary || item.resumo}</div>
+                    <div style={{ fontSize: '13px', color: '#374151' }}>
+                      {(() => {
+                        // Preferir campos formatados da API quando existirem
+                        if (item.data_br && item.fim_br) {
+                          return `${item.data_br} — ${new Date(item.fim || item.end_time || item.data).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+                        }
+                        const start = new Date(item.data || item.start_time);
+                        const end = new Date(item.fim || item.end_time || (start.getTime() + 60 * 60000));
+                        return `${start.toLocaleString('pt-BR')} — ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+                      })()}
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#6b7280' }}>
+                      {(() => {
+                        const tipo = item.tipo || (item.agenda_type === 'online' ? 'reuniao' : 'visita');
+                        const cliente = item.cliente_nome || item.client_name || '';
+                        const local = item.local || (tipo === 'reuniao' ? 'Online' : 'Loja');
+                        return `Tipo: ${tipo} ${cliente ? `| Cliente: ${cliente}` : ''} | Local: ${local}`;
+                      })()}
+                    </div>
+                  </div>
+                  <div>
+                    <button className="btn btn-secondary" style={{ marginRight: 8 }} onClick={() => handleUpdateAppointment(item.id, item)}>✏️ Alterar</button>
+                    <button className="btn btn-danger" onClick={() => handleDeleteAppointment(item.id)}>🗑️ Cancelar</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
       <style>{`
