@@ -5,8 +5,16 @@ const path = require('path');
 const { exec } = require('child_process');
 const {
   createCalendarEventWithValidation,
+  checkTimeSlotAvailability,
+  suggestAlternativeTimes,
+  isWithinWorkingHours,
 } = require('../config/google-calendar');
-const { createAppointment } = require('../models/agendamento');
+const { createAppointment, findConflicts } = require('../models/agendamento');
+const OpenAI = require('openai');
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 let client = null;
 let qrString = '';
@@ -14,6 +22,608 @@ let status = 'disconnected';
 let pausedUntil = null;
 let initializationAttempt = 0;
 let chatPauses = new Map();
+
+// ========== FERRAMENTAS DO GOOGLE CALENDAR ==========
+
+const calendarTools = [
+  {
+    type: 'function',
+    function: {
+      name: 'verificar_disponibilidade',
+      description: 'Verifica se um horário específico está disponível para agendamento',
+      parameters: {
+        type: 'object',
+        properties: {
+          data: {
+            type: 'string',
+            description: 'Data no formato DD/MM/AAAA',
+          },
+          horario: {
+            type: 'string',
+            description: 'Horário no formato HH:MM (ex: 14:00)',
+          },
+          tipo: {
+            type: 'string',
+            enum: ['online', 'loja'],
+            description: 'Tipo de agendamento: online (reunião) ou loja (visita presencial)',
+          },
+        },
+        required: ['data', 'horario', 'tipo'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'sugerir_horarios',
+      description: 'Sugere horários alternativos disponíveis próximos à data solicitada',
+      parameters: {
+        type: 'object',
+        properties: {
+          data: {
+            type: 'string',
+            description: 'Data desejada no formato DD/MM/AAAA',
+          },
+          tipo: {
+            type: 'string',
+            enum: ['online', 'loja'],
+            description: 'Tipo de agendamento: online (reunião) ou loja (visita presencial)',
+          },
+        },
+        required: ['data', 'tipo'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'criar_agendamento',
+      description: 'Cria um novo agendamento no Google Calendar após confirmar disponibilidade',
+      parameters: {
+        type: 'object',
+        properties: {
+          cliente_nome: {
+            type: 'string',
+            description: 'Nome completo do cliente',
+          },
+          data: {
+            type: 'string',
+            description: 'Data do agendamento no formato DD/MM/AAAA',
+          },
+          horario: {
+            type: 'string',
+            description: 'Horário do agendamento no formato HH:MM',
+          },
+          tipo: {
+            type: 'string',
+            enum: ['online', 'loja'],
+            description: 'Tipo: online (reunião) ou loja (visita presencial)',
+          },
+          duracao: {
+            type: 'number',
+            description: 'Duração em minutos (padrão: 60)',
+            default: 60,
+          },
+        },
+        required: ['cliente_nome', 'data', 'horario', 'tipo'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancelar_agendamento',
+      description: 'Cancela o último agendamento do cliente',
+      parameters: {
+        type: 'object',
+        properties: {
+          confirmar: {
+            type: 'boolean',
+            description: 'Confirmação do cancelamento',
+          },
+        },
+        required: ['confirmar'],
+      },
+    },
+  },
+];
+
+// ========== HANDLERS DAS FERRAMENTAS ==========
+
+function parseBrazilDateTime(dateStr, timeStr) {
+  // Tratamento de datas relativas
+  const today = new Date();
+  const brazilOffset = -3; // UTC-3
+  
+  // Ajustar para timezone do Brasil
+  const brazilNow = new Date(today.getTime() + (brazilOffset * 60 * 60 * 1000));
+  
+  let day, month, year;
+  
+  // Detectar "amanhã", "hoje", etc.
+  const lowerDate = dateStr.toLowerCase().trim();
+  
+  if (lowerDate.includes('amanhã') || lowerDate.includes('amanha')) {
+    const tomorrow = new Date(brazilNow);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    day = tomorrow.getDate();
+    month = tomorrow.getMonth() + 1;
+    year = tomorrow.getFullYear();
+    console.log(`📅 Detectado "amanhã" → ${day}/${month}/${year}`);
+  } else if (lowerDate.includes('hoje')) {
+    day = brazilNow.getDate();
+    month = brazilNow.getMonth() + 1;
+    year = brazilNow.getFullYear();
+    console.log(`📅 Detectado "hoje" → ${day}/${month}/${year}`);
+  } else {
+    // Formato DD/MM ou DD/MM/AAAA
+    const parts = dateStr.split('/').map(Number);
+    day = parts[0];
+    month = parts[1];
+    year = parts[2] || new Date().getFullYear();
+  }
+  
+  const [hour, minute] = timeStr.split(':').map(Number);
+  
+  console.log(`🕐 Parseando: ${day}/${month}/${year} ${hour}:${minute}`);
+  
+  // Criar data em UTC ajustando para Brasil (UTC-3)
+  return new Date(Date.UTC(year, month - 1, day, hour + 3, minute, 0, 0));
+}
+
+async function handleVerificarDisponibilidade(args) {
+  try {
+    const { data, horario, tipo } = args;
+    
+    const start = parseBrazilDateTime(data, horario);
+    const end = new Date(start.getTime() + 60 * 60000); // +1 hora
+    
+    // Validar horário de trabalho
+    if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
+      return {
+        disponivel: false,
+        motivo: 'fora_expediente',
+        mensagem: 'Este horário está fora do nosso expediente (8h às 18h, segunda a sexta).',
+      };
+    }
+    
+    // Verificar conflitos no banco
+    const conflicts = await findConflicts(start, end, tipo);
+    
+    if (conflicts.length > 0) {
+      return {
+        disponivel: false,
+        motivo: 'ocupado',
+        mensagem: 'Este horário já está ocupado.',
+        conflitos: conflicts.length,
+      };
+    }
+    
+    return {
+      disponivel: true,
+      mensagem: `O horário ${horario} do dia ${data} está disponível para ${tipo === 'online' ? 'reunião online' : 'visita à loja'}!`,
+    };
+  } catch (error) {
+    console.error('❌ Erro ao verificar disponibilidade:', error);
+    return {
+      erro: true,
+      mensagem: 'Erro ao verificar disponibilidade. Por favor, tente novamente.',
+    };
+  }
+}
+
+async function handleSugerirHorarios(args) {
+  try {
+    const { data, tipo } = args;
+    
+    // Usar meio-dia como referência para buscar horários disponíveis
+    const referenceDate = parseBrazilDateTime(data, '12:00');
+    
+    const suggestions = await suggestAlternativeTimes(referenceDate, 60, { agendaType: tipo });
+    
+    if (suggestions.length === 0) {
+      return {
+        sugestoes: [],
+        mensagem: 'Não encontrei horários disponíveis neste dia. Poderia tentar outro dia?',
+      };
+    }
+    
+    const formatted = suggestions.slice(0, 3).map(s => ({
+      data: s.start.toLocaleDateString('pt-BR'),
+      horario: s.start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      fim: s.end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+    }));
+    
+    return {
+      sugestoes: formatted,
+      mensagem: `Encontrei ${formatted.length} horários disponíveis:`,
+    };
+  } catch (error) {
+    console.error('❌ Erro ao sugerir horários:', error);
+    return {
+      erro: true,
+      mensagem: 'Erro ao buscar horários. Por favor, tente novamente.',
+    };
+  }
+}
+
+async function handleCriarAgendamento(args, phoneNumber) {
+  try {
+    const { cliente_nome, data, horario, tipo, duracao = 60 } = args;
+    
+    const start = parseBrazilDateTime(data, horario);
+    const end = new Date(start.getTime() + duracao * 60000);
+    
+    // Validar horário de trabalho
+    if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
+      return {
+        sucesso: false,
+        mensagem: 'Este horário está fora do expediente (8h às 18h, seg a sex).',
+      };
+    }
+    
+    // Verificar conflitos
+    const conflicts = await findConflicts(start, end, tipo);
+    if (conflicts.length > 0) {
+      // Sugerir alternativas
+      const suggestions = await suggestAlternativeTimes(start, duracao, { agendaType: tipo });
+      const formatted = suggestions.slice(0, 2).map(s => 
+        `${s.start.toLocaleDateString('pt-BR')} às ${s.start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
+      ).join('\n• ');
+      
+      return {
+        sucesso: false,
+        mensagem: `Este horário não está mais disponível. Que tal um destes?\n\n• ${formatted}`,
+      };
+    }
+    
+    // Criar agendamento
+    const summary = tipo === 'online' 
+      ? `Atendimento - Reunião Online | ${cliente_nome}`
+      : `Atendimento - Visita à Loja | ${cliente_nome}`;
+    
+    const description = `Cliente: ${cliente_nome}\nWhatsApp: ${phoneNumber}\nTipo: ${tipo === 'online' ? 'Reunião Online' : 'Visita à Loja'}`;
+    
+    console.log('📅 Criando evento no Google Calendar...');
+    
+    // 1. CRIAR NO GOOGLE CALENDAR PRIMEIRO
+    let calendarEventId = null;
+    let htmlLink = null;
+    
+    try {
+      const { createCalendarEvent } = require('../config/google-calendar');
+      const calendarEvent = await createCalendarEvent(
+        summary,
+        description,
+        start,
+        end,
+        { agendaType: tipo, clientName: cliente_nome }
+      );
+      
+      calendarEventId = calendarEvent.id;
+      htmlLink = calendarEvent.htmlLink;
+      
+      console.log('✅ Evento criado no Google Calendar:', calendarEventId);
+      console.log('🔗 Link:', htmlLink);
+    } catch (calendarError) {
+      console.error('⚠️ Erro ao criar no Google Calendar:', calendarError.message);
+      console.log('💾 Continuando apenas com banco de dados...');
+    }
+    
+    // 2. SALVAR NO BANCO
+    await createAppointment({
+      calendarEventId,
+      summary,
+      description,
+      startTime: start,
+      endTime: end,
+      agendaType: tipo,
+      clientName: cliente_nome,
+      phoneNumber,
+    });
+    
+    const dataFormatted = start.toLocaleDateString('pt-BR');
+    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const tipoFormatted = tipo === 'online' ? 'Reunião online' : 'Visita à loja';
+    
+    let linkText = '';
+    if (htmlLink) {
+      linkText = `\n🔗 Link: ${htmlLink}`;
+    }
+    
+    return {
+      sucesso: true,
+      mensagem: `✅ Agendamento confirmado!\n\n📅 ${tipoFormatted}\n🗓️ ${dataFormatted} às ${horaFormatted}\n👤 ${cliente_nome}${linkText}`,
+      detalhes: {
+        data: dataFormatted,
+        horario: horaFormatted,
+        tipo: tipoFormatted,
+        calendarEventId,
+        htmlLink,
+      },
+    };
+  } catch (error) {
+    console.error('❌ Erro ao criar agendamento:', error);
+    return {
+      sucesso: false,
+      mensagem: 'Erro ao confirmar o agendamento. Por favor, tente novamente.',
+    };
+  }
+}
+
+async function handleCancelarAgendamento(phoneNumber) {
+  try {
+    const { findLatestByPhone } = require('../models/agendamento');
+    const latest = await findLatestByPhone(phoneNumber);
+    
+    if (!latest) {
+      return {
+        sucesso: false,
+        mensagem: 'Não encontrei nenhum agendamento ativo para cancelar.',
+      };
+    }
+    
+    // Remover do banco
+    await pool.query('DELETE FROM appointments WHERE id = $1', [latest.id]);
+    
+    const start = new Date(latest.start_time);
+    const dataFormatted = start.toLocaleDateString('pt-BR');
+    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    
+    return {
+      sucesso: true,
+      mensagem: `✅ Agendamento cancelado com sucesso!\n\n${latest.summary}\n📅 ${dataFormatted} às ${horaFormatted}`,
+    };
+  } catch (error) {
+    console.error('❌ Erro ao cancelar agendamento:', error);
+    return {
+      sucesso: false,
+      mensagem: 'Erro ao cancelar o agendamento. Por favor, tente novamente.',
+    };
+  }
+}
+
+// ========== PROCESSAMENTO DE FUNCTION CALLING ==========
+
+async function processFunctionCalls(toolCalls, phoneNumber) {
+  const results = [];
+  
+  for (const toolCall of toolCalls) {
+    const functionName = toolCall.function.name;
+    const args = JSON.parse(toolCall.function.arguments);
+    
+    console.log(`🔧 Executando ferramenta: ${functionName}`, args);
+    
+    let result;
+    
+    switch (functionName) {
+      case 'verificar_disponibilidade':
+        result = await handleVerificarDisponibilidade(args);
+        break;
+      case 'sugerir_horarios':
+        result = await handleSugerirHorarios(args);
+        break;
+      case 'criar_agendamento':
+        result = await handleCriarAgendamento(args, phoneNumber);
+        break;
+      case 'cancelar_agendamento':
+        result = await handleCancelarAgendamento(phoneNumber);
+        break;
+      default:
+        result = { erro: true, mensagem: 'Função não reconhecida' };
+    }
+    
+    results.push({
+      tool_call_id: toolCall.id,
+      role: 'tool',
+      name: functionName,
+      content: JSON.stringify(result),
+    });
+  }
+  
+  return results;
+}
+
+// ========== GERAÇÃO DE RESPOSTA COM FUNCTION CALLING ==========
+
+async function generateChatbotResponse(message, stateObj, contact, phoneNumber) {
+  const { state, metadata } = stateObj;
+  const customerName = contact.pushname || contact.name || 'Cliente';
+
+  const systemPrompt = `
+Você é **Maria**, especialista virtual da **Artestofados**, empresa de fabricação e reforma de estofados em João Pessoa - PB.
+
+🎯 **PAPEL**
+Atender clientes com simpatia, coletar informações e **EXECUTAR as ferramentas** para verificar disponibilidade e criar agendamentos.
+
+📅 **REGRAS CRÍTICAS DE AGENDAMENTO - LEIA COM ATENÇÃO**
+
+**VOCÊ TEM FERRAMENTAS DISPONÍVEIS - USE-AS SEMPRE!**
+
+1. **VERIFICAR DISPONIBILIDADE**:
+   - Quando o cliente mencionar uma data/horário, chame IMEDIATAMENTE "verificar_disponibilidade"
+   - Exemplo: Cliente diz "amanhã às 10h" → CHAME a ferramenta agora!
+   - NÃO diga "vou verificar" - EXECUTE a verificação
+
+2. **CRIAR AGENDAMENTO**:
+   - Quando tiver: nome do cliente + data + horário + tipo (online/loja)
+   - CHAME IMEDIATAMENTE "criar_agendamento" 
+   - NÃO diga "vou criar" - EXECUTE a criação
+   - A ferramenta retornará a confirmação, então aguarde o resultado
+
+3. **SUGERIR HORÁRIOS**:
+   - Se "verificar_disponibilidade" retornar ocupado
+   - CHAME "sugerir_horarios" automaticamente
+   - NÃO invente horários - use a ferramenta
+
+4. **FORMATO DE DATAS**:
+   - Aceite: "amanhã", "31/10", "31/10/2025"
+   - Converta para DD/MM/AAAA antes de chamar a ferramenta
+   - Ano atual: 2025
+
+5. **TIPOS DE AGENDAMENTO**:
+   - "online" = Reunião online/virtual/videochamada
+   - "loja" = Visita presencial/ir até a loja
+
+⚠️ **COMPORTAMENTO OBRIGATÓRIO**
+
+❌ **NUNCA FAÇA ISSO**:
+- "Vou verificar a disponibilidade" (sem chamar a ferramenta)
+- "Vou criar seu agendamento" (sem chamar a ferramenta)
+- "Confirmo que o horário está disponível" (sem ter verificado)
+- Responder antes de receber o resultado da ferramenta
+
+✅ **SEMPRE FAÇA ISSO**:
+- Cliente menciona horário → Chame "verificar_disponibilidade" IMEDIATAMENTE
+- Tem todos os dados (nome, data, hora, tipo) → Chame "criar_agendamento" IMEDIATAMENTE
+- Horário ocupado → Chame "sugerir_horarios" IMEDIATAMENTE
+- Aguarde o RESULTADO da ferramenta antes de responder
+
+💬 **TOM E PERSONALIDADE**
+- Amigável, calorosa e empática 💙
+- Respostas concisas após receber resultado das ferramentas
+- Use emojis naturalmente
+- Seja paciente e prestativa
+
+🧭 **FLUXO COMPLETO**
+
+**EXEMPLO CORRETO:**
+
+Cliente: "Quero agendar para amanhã às 10h"
+Você: [CHAMA verificar_disponibilidade("31/10/2025", "10:00", "loja")]
+[AGUARDA RESULTADO]
+Resultado: {"disponivel": true}
+Você: "Ótimo! Às 10h está livre. Qual seu nome completo?"
+Cliente: "João Silva"
+Você: [CHAMA criar_agendamento("João Silva", "31/10/2025", "10:00", "loja", 60)]
+[AGUARDA RESULTADO]
+Resultado: {"sucesso": true, "mensagem": "✅ Agendamento confirmado!..."}
+Você: [REPETE a mensagem de confirmação do resultado]
+
+**EXEMPLO INCORRETO:**
+
+Cliente: "Quero agendar para amanhã às 10h"
+Você: "Vou verificar a disponibilidade para você! Um momento." ❌
+[NÃO CHAMOU A FERRAMENTA]
+
+🏢 **INFORMAÇÕES**
+- Endereço: Av. Almirante Barroso, 389, Centro – João Pessoa – PB
+- Horário: Segunda a sexta, 8:00 às 18:00
+- Ano atual: 2025
+
+🔑 **LEMBRE-SE**
+Você tem FERRAMENTAS poderosas. Quando souber o que fazer, EXECUTE imediatamente. Não avise que vai executar - EXECUTE!
+`;
+
+  const conversation = [{ role: 'system', content: systemPrompt }];
+
+  if (metadata.history) {
+    conversation.push(...metadata.history);
+  }
+
+  conversation.push({ role: 'user', content: message });
+
+  try {
+    console.log('🤖 Chamando OpenAI com Function Calling...');
+    console.log('📝 Mensagem do usuário:', message);
+    console.log('📊 Histórico:', metadata.history?.length || 0, 'mensagens');
+    
+    // Primeira chamada - pode retornar tool_calls
+    let completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: conversation,
+      tools: calendarTools,
+      tool_choice: 'auto', // Deixar a IA decidir
+      temperature: 0.7,
+      max_tokens: 800,
+    });
+
+    let responseMessage = completion.choices[0].message;
+    
+    console.log('📨 Primeira resposta da IA:');
+    console.log('  - Tem tool_calls?', !!responseMessage.tool_calls);
+    console.log('  - Tem conteúdo?', !!responseMessage.content);
+    console.log('  - Conteúdo:', responseMessage.content?.substring(0, 100));
+    
+    conversation.push(responseMessage);
+
+    // Se há tool_calls, processar
+    if (responseMessage.tool_calls) {
+      console.log(`🔧 ${responseMessage.tool_calls.length} ferramenta(s) chamada(s):`);
+      responseMessage.tool_calls.forEach(tc => {
+        console.log(`   - ${tc.function.name}(${tc.function.arguments})`);
+      });
+      
+      const toolResults = await processFunctionCalls(responseMessage.tool_calls, phoneNumber);
+      
+      console.log('📦 Resultados das ferramentas:');
+      toolResults.forEach(tr => {
+        console.log(`   - ${tr.name}: ${tr.content.substring(0, 100)}...`);
+      });
+      
+      conversation.push(...toolResults);
+
+      // Segunda chamada - com resultados das ferramentas
+      console.log('🤖 Fazendo segunda chamada com resultados...');
+      completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: conversation,
+        temperature: 0.7,
+        max_tokens: 800,
+      });
+
+      responseMessage = completion.choices[0].message;
+      console.log('✅ Segunda resposta (final):', responseMessage.content?.substring(0, 100));
+    } else {
+      console.log('⚠️ Nenhuma ferramenta foi chamada na primeira resposta');
+    }
+
+    const response = responseMessage.content;
+    
+    if (!response) {
+      console.error('❌ Resposta vazia da IA!');
+      return {
+        response: 'Desculpe, tive um problema ao processar sua mensagem. Pode repetir?',
+        nextState: state,
+        metadata,
+      };
+    }
+    
+    console.log('✅ Resposta final gerada:', response.substring(0, 100) + '...');
+
+    // Atualizar histórico
+    if (!metadata.history) metadata.history = [];
+    metadata.history.push(
+      { role: 'user', content: message },
+      { role: 'assistant', content: response }
+    );
+
+    // Limitar histórico a 10 mensagens
+    if (metadata.history.length > 20) {
+      metadata.history = metadata.history.slice(-20);
+    }
+
+    if (!metadata.customerName && customerName !== 'Cliente') {
+      metadata.customerName = customerName;
+    }
+
+    // Estado simplificado - deixar a IA gerenciar
+    let nextState = state || 'conversando';
+
+    return { response, nextState, metadata };
+  } catch (error) {
+    console.error('❌ Erro no OpenAI:', error);
+    console.error('Stack:', error.stack);
+    
+    return {
+      response: `Olá! 😊 Seja bem-vindo(a) à Artestofados!\n\nEstou com um probleminha técnico no momento, mas um atendente responderá em breve.\n\nComo posso ajudar você hoje?`,
+      nextState: state,
+      metadata,
+    };
+  }
+}
+
+// ========== RESTANTE DO CÓDIGO (manter funções existentes) ==========
 
 function cleanupSession() {
   console.log('🧹 Cleaning up session and locks...');
@@ -199,7 +809,6 @@ async function initializeWhatsApp(forceNew = false) {
     cleanupSession();
     client = null;
     
-    // Tentar reconectar automaticamente após 30 segundos
     console.log('🔄 Will attempt to reconnect in 30 seconds...');
     setTimeout(async () => {
       try {
@@ -226,7 +835,6 @@ async function handleIncomingMessage(msg) {
     console.log('📩 NEW MESSAGE RECEIVED');
     console.log('='.repeat(80));
     
-    // Verificar se é mensagem de grupo e ignorar
     const chat = await msg.getChat();
     if (chat.isGroup) {
       console.log('👥 Message from GROUP - IGNORING');
@@ -342,55 +950,8 @@ async function processChatbotMessage(msg) {
     const state = await getConversationState(sessionId);
     console.log('✅ Current state:', JSON.stringify(state));
     
-    console.log('🧠 Generating chatbot response...');
-    const response = await generateChatbotResponse(msg.body, state, contact);
-
-    // Tentar agendar automaticamente se mensagem tiver data/horário e tipo
-    // Tentar agendar automaticamente se mensagem tiver data/horário e tipo
-    const schedulingResult = await tryScheduleFromMessage(msg.body, state.metadata, contact, fromNumber);
-    if (schedulingResult?.scheduled) {
-      // Mensagem determinística de confirmação (evita contradição do LLM)
-      const confirmation = `✅ Agendamento confirmado: ${schedulingResult.humanReadable}\nLink: ${schedulingResult.htmlLink || '—'}`;
-      const followup = '\n\nSe precisar alterar ou cancelar, me avise por aqui. 👍';
-      response.response = `${confirmation}${followup}`;
-      // Persistiremos metadados após enviar a resposta (já abaixo)
-      response.metadata = {
-        ...response.metadata,
-        lastScheduledEvent: schedulingResult.eventPublic,
-      };
-    } else if (schedulingResult && schedulingResult.scheduled === false) {
-      // Mensagem determinística de indisponibilidade (não deixar o LLM confirmar acidentalmente)
-      const header = schedulingResult.reason === 'outside_hours'
-        ? '⌛ Infelizmente este horário está fora do nosso expediente (8h às 18h, seg a sex).'
-        : '⚠️ Este horário já está ocupado para esta modalidade.';
-      const sugg = (schedulingResult.suggestions || [])
-        .slice(0, 2)
-        .map(s => `• ${s.formatted}`)
-        .join('\n');
-
-      const suggestionsText = sugg ? `\n\nSugestões disponíveis:\n${sugg}` : '';
-      response.response = `${header}${suggestionsText}\n\nPosso reservar um desses horários para você?`;
-    } else if (schedulingResult === null) {
-      // NÃO conseguiu parsear data/hora - FORÇAR o bot a pedir formato correto
-      console.log('⚠️ Parse falhou - forçando bot a pedir formato DD/MM');
-      
-      // Checar se a mensagem contém termos relativos
-      const hasRelativeTerms = /\b(amanha|amanhã|hoje|depois|segunda|terça|terca|quarta|quinta|sexta|sabado|sábado|domingo)\b/i.test(msg.body);
-      
-      if (hasRelativeTerms) {
-        // Sobrescrever resposta da IA para forçar pedido de data correta
-        response.response = `Para garantir que não haja erros no agendamento, preciso que você me informe a data no formato DD/MM e o horário.\n\n📅 Exemplo: 31/10 às 14:00\n\nQual data e horário você prefere? 😊`;
-      }
-    }
-    
-    // Tentar cancelar/remarcar pelo texto
-    const cancelResult = await tryCancelOrRescheduleFromMessage(msg.body, fromNumber);
-    if (cancelResult?.changed) {
-      const confirmation = cancelResult.type === 'cancel'
-        ? `✅ Agendamento cancelado: ${cancelResult.humanReadable}`
-        : `✅ Agendamento remarcado: ${cancelResult.humanReadable}`;
-      response.response = `${confirmation}\n\n${response.response}`;
-    }
+    console.log('🧠 Generating chatbot response with Function Calling...');
+    const response = await generateChatbotResponse(msg.body, state, contact, fromNumber);
     
     if (response) {
       console.log('✅ Response generated:', response.response.substring(0, 100) + '...');
@@ -409,7 +970,6 @@ async function processChatbotMessage(msg) {
     console.error('❌ ERROR in processChatbotMessage:', error);
     console.error('Stack trace:', error.stack);
     
-    // Só tentar enviar mensagem de erro se ainda estiver conectado
     if (status === 'connected' && client) {
       try {
         const contact = await msg.getContact();
@@ -482,198 +1042,6 @@ async function updateConversationState(sessionId, newState, metadata = {}) {
   }
 }
 
-async function generateChatbotResponse(message, stateObj, contact) {
-  const openai = require('../config/openai');
-  const { state, metadata } = stateObj;
-
-  console.log('🔑 Checking OpenAI API Key...');
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('❌ OPENAI_API_KEY not configured in .env file!');
-    throw new Error('OpenAI API Key not configured');
-  }
-  console.log('✅ OpenAI API Key configured');
-
-  const customerName = contact.pushname || contact.name || 'Cliente';
-
-  const systemPrompt = `
-  Você é **Maria**, a especialista virtual da **Artestofados**, empresa especializada em **fabricação e reforma de estofados** em João Pessoa - PB.  
-  Seu papel é **atender clientes interessados nos serviços da loja**, guiando-os com simpatia e clareza até a coleta de informações ou agendamento de visita.
-
-  ---
-
-  🎯 **OBJETIVO PRINCIPAL**
-  Atender **apenas perguntas relacionadas à Artestofados**, seus **serviços, produtos, orçamentos, reformas, fabricações, agendamentos e informações da loja**.
-
-  ❌ **NÃO RESPONDER** a perguntas fora do contexto da empresa (como dúvidas pessoais, piadas, política, tecnologia, etc).  
-  Em caso de perguntas fora do escopo, diga gentilmente:
-  > "Posso te ajudar com informações sobre nossos serviços de estofados, reformas ou fabricação. 😊 Quer saber mais sobre algum deles?"
-
-  ---
-
-  💬 **PERSONALIDADE E TOM**
-  - Amigável, calorosa e empática 💙  
-  - Respostas concisas, mas completas  
-  - Use emojis de forma leve e natural  
-  - Trate o cliente pelo nome quando possível  
-  - Seja prestativa, paciente e educada  
-  - Nunca pressione o cliente  
-
-  ---
-
-  🧭 **FLUXO DA CONVERSA**
-
-  ### 1. BOAS-VINDAS (state: initial)
-  - Cumprimente com calor e simpatia  
-  - Apresente-se como *Maria, especialista virtual da Artestofados*  
-  - Pergunte o nome do cliente, se ainda não souber  
-  - Pergunte como pode ajudar  
-
-  ---
-
-  ### 2. CLASSIFICAÇÃO DO SERVIÇO (state: classifying)
-  - Identifique se o cliente deseja **fabricação** ou **reforma**
-  - Se não ficar claro, pergunte educadamente  
-  - **Reforma:** explique que será necessário enviar fotos do móvel  
-  - **Fabricação:** pergunte se o cliente já tem um projeto em mente  
-
-  ---
-
-  ### 3. COLETA DE INFORMAÇÕES (state: collecting_info)
-
-  #### 🛋️ Para REFORMA:
-  - Pergunte qual o tipo de móvel, tamanho e problema  
-  - Solicite fotos do móvel  
-  - Pergunte se já tem tecido escolhido  
-  - Agradeça e informe que a equipe retornará em breve  
-
-  #### 🪑 Para FABRICAÇÃO:
-  - Pergunte sobre o tipo de projeto desejado  
-  - Caso queira catálogo, diga:
-    > "Durante a visita, você poderá conhecer nossos modelos, mas a maioria é personalizada conforme seu gosto 😊"
-  - Se perguntar sobre valores:
-    > "Os valores variam conforme o projeto, mas posso agendar uma reunião ou visita para orçamento mais preciso."
-  - Ofereça:  
-    > "Posso agendar uma reunião online ou uma visita na loja. Qual você prefere?"
-
-  ---
-
-  📅 **REGRAS DE AGENDAMENTO (CRÍTICAS)**
-
-  ⚠️ **Formato obrigatório:** DD/MM/AAAA às HH:MM  
-  - **NUNCA** aceite datas como “amanhã”, “hoje”, “segunda-feira”, “semana que vem”, etc.  
-  - Se o cliente usar termos relativos, responda:
-    > "Para evitar erros, preciso da data completa no formato DD/MM/AAAA e o horário (por exemplo: 31/10/2025 às 14:00). Qual data você prefere?"
-  - **NUNCA** confirme ou diga “está agendado”, “confirmado” ou “marcado” sem antes receber uma data **no formato DD/MM/AAAA às HH:MM**.
-  - Após receber o formato correto, repita os detalhes exatamente como o cliente informou, confirmando que entendeu.
-
-  ---
-
-  ### 4. FINALIZAÇÃO (state: completed)
-  - Agradeça pela preferência e simpatia do cliente  
-  - Reforce os próximos passos  
-  - Deixe o canal aberto para dúvidas futuras  
-  - Despeça-se de forma gentil e calorosa  
-    > "Obrigada pelo contato! 💙 Ficarei feliz em ajudar sempre que precisar."
-
-  ---
-
-  🏢 **INFORMAÇÕES DA EMPRESA**
-  - **Nome:** Artestofados  
-  - **Endereço:** Av. Almirante Barroso, 389, Centro – João Pessoa – PB  
-  - **CNPJ:** 08.621.718/0001-07  
-  - **Horário de funcionamento:** Segunda a sexta, das 07:30 às 18:00  
-
-  ---
-
-  💡 **DICAS DE CONDUTA**
-  - Faça **uma pergunta por vez**  
-  - Sempre confirme o entendimento antes de prosseguir  
-  - Seja educada, acolhedora e profissional  
-  - Evite respostas automáticas ou frias  
-  - Mantenha o foco nos serviços da empresa  
-  - **NUNCA confirme agendamento sem formato DD/MM/AAAA e HH:MM**  
-  - **NUNCA responda a perguntas fora do contexto da loja**
-  `;
-
-
-  const conversation = [
-    { role: 'system', content: systemPrompt },
-  ];
-
-  if (metadata.history) {
-    conversation.push(...metadata.history);
-  }
-
-  conversation.push({ role: 'user', content: message });
-
-  try {
-    console.log('🤖 Calling OpenAI API...');
-    console.log('📝 Conversation length:', conversation.length, 'messages');
-    
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: conversation,
-      temperature: 0.7,
-      max_tokens: 800
-    });
-
-    console.log('✅ OpenAI response received');
-    const response = completion.choices[0].message.content;
-    console.log('💬 Response length:', response.length, 'chars');
-
-    if (!metadata.history) metadata.history = [];
-    metadata.history.push(
-      { role: 'user', content: message },
-      { role: 'assistant', content: response }
-    );
-
-    if (!metadata.customerName && customerName !== 'Cliente') {
-      metadata.customerName = customerName;
-    }
-
-    let nextState = state;
-    const lowerMessage = message.toLowerCase();
-    
-    if (state === 'initial') {
-      nextState = 'classifying';
-    } else if (state === 'classifying') {
-      if (lowerMessage.includes('reform') || lowerMessage.includes('conser') || lowerMessage.includes('arrum')) {
-        metadata.serviceType = 'reforma';
-        nextState = 'collecting_info';
-      } else if (lowerMessage.includes('fabric') || lowerMessage.includes('fazer') || lowerMessage.includes('novo')) {
-        metadata.serviceType = 'fabricacao';
-        nextState = 'collecting_info';
-      }
-    } else if (state === 'collecting_info') {
-      if (metadata.serviceType === 'reforma' && (lowerMessage.includes('foto') || lowerMessage.includes('image'))) {
-        nextState = 'waiting_photos';
-      } else if (metadata.serviceType === 'fabricacao' && (lowerMessage.includes('agendar') || lowerMessage.includes('reunião') || lowerMessage.includes('visita'))) {
-        nextState = 'scheduling';
-      }
-      
-      if (lowerMessage.includes('obrigad') || lowerMessage.includes('valeu') || lowerMessage.includes('ok')) {
-        nextState = 'completed';
-      }
-    }
-
-    return { response, nextState, metadata };
-  } catch (error) {
-    console.error('❌ ERROR calling OpenAI:', error);
-    console.error('Error details:', {
-      message: error.message,
-      code: error.code,
-      status: error.status,
-      type: error.type
-    });
-    
-    return {
-      response: `Olá! 😊 Seja bem-vindo(a) à Artestofados!\n\nNo momento estou com um probleminha técnico, mas fique tranquilo(a)! Um dos nossos atendentes vai te responder em breve.\n\nPor favor, me conte: como podemos ajudar você hoje?`,
-      nextState: state,
-      metadata
-    };
-  }
-}
-
 async function sendMessage(phoneNumber, response) {
   if (!client || status !== 'connected') {
     console.error('❌ Cannot send message - client not connected');
@@ -688,7 +1056,6 @@ async function sendMessage(phoneNumber, response) {
     console.log('📤 Sending to:', chatId);
     console.log('💬 Message preview:', response.substring(0, 50) + '...');
     
-    // Verificar se o chat existe antes de enviar
     try {
       const chat = await client.getChatById(chatId);
       if (!chat) {
@@ -697,7 +1064,6 @@ async function sendMessage(phoneNumber, response) {
       }
     } catch (chatError) {
       console.error('❌ Error getting chat:', chatError.message);
-      // Tentar enviar mesmo assim
     }
     
     await client.sendMessage(chatId, response);
@@ -705,7 +1071,6 @@ async function sendMessage(phoneNumber, response) {
   } catch (error) {
     console.error('❌ Error sending message:', error);
     
-    // Se erro de conexão, marcar como desconectado
     if (error.message.includes('getChat') || error.message.includes('Evaluation failed')) {
       console.error('🔌 WhatsApp connection lost - marking as disconnected');
       status = 'disconnected';
@@ -713,303 +1078,6 @@ async function sendMessage(phoneNumber, response) {
     }
     
     throw error;
-  }
-}
-
-// ===== Helpers de agendamento pelo texto =====
-function inferAgendaTypeFromText(text, fallback) {
-  const t = (text || '').toLowerCase();
-  if (t.includes('online') || t.includes('vídeo') || t.includes('video') || t.includes('reuni')) return 'online';
-  if (t.includes('loja') || t.includes('visita') || t.includes('presenc')) return 'loja';
-  return fallback || '';
-}
-
-// ENCONTRE ESTA FUNÇÃO (linha ~14):
-function buildBrazilDate(year, monthIndex, day, hour = 0, minute = 0, second = 0, ms = 0) {
-  return new Date(Date.UTC(year, monthIndex, day, hour + 3, minute, second, ms));
-}
-
-// ADICIONE LOGO APÓS:
-function getBrazilToday() {
-  const nowUTC = new Date();
-  const formatter = new Intl.DateTimeFormat('pt-BR', {
-    timeZone: 'America/Sao_Paulo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  });
-  const parts = formatter.formatToParts(nowUTC);
-  const day = parseInt(parts.find(p => p.type === 'day').value, 10);
-  const month = parseInt(parts.find(p => p.type === 'month').value, 10) - 1;
-  const year = parseInt(parts.find(p => p.type === 'year').value, 10);
-  return new Date(year, month, day);
-}
-
-function parseDateTimeFromText(text) {
-  if (!text) return null;
-  const t = text.toLowerCase().trim();
-  const nowBrazil = getBrazilToday(); // Data de HOJE no Brasil
-
-  function normalizeHourMinute(hhStr, mmStr) {
-    const hour = Math.max(0, Math.min(23, parseInt(hhStr, 10)));
-    const minute = mmStr != null ? Math.max(0, Math.min(59, parseInt(mmStr, 10))) : 0;
-    return { hour, minute };
-  }
-
-  // ===== REMOVIDO: Expressões relativas (hoje, amanhã, etc) =====
-  // Agora só aceita datas no formato DD/MM/AAAA ou DD/MM
-  
-  // Data explícita: DD/MM/AAAA ou DD/MM
-  let explicitDate = null;
-  let m = t.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
-  if (m) {
-    const [_, dd, mm, yyyy] = m;
-    explicitDate = new Date(parseInt(yyyy, 10), parseInt(mm, 10) - 1, parseInt(dd, 10));
-    console.log('📅 Data explícita detectada:', explicitDate.toLocaleDateString('pt-BR'));
-  } else {
-    m = t.match(/\b(\d{1,2})\/(\d{1,2})\b/);
-    if (m) {
-      const [_, dd, mm] = m;
-      explicitDate = new Date(nowBrazil.getFullYear(), parseInt(mm, 10) - 1, parseInt(dd, 10));
-      console.log('📅 Data explícita (sem ano) detectada:', explicitDate.toLocaleDateString('pt-BR'));
-    }
-  }
-
-  // Se não encontrou data no formato DD/MM, retorna null
-  if (!explicitDate) {
-    console.log('❌ Data não encontrada no formato DD/MM ou DD/MM/AAAA');
-    return null;
-  }
-
-  // Hora: "às 14h30", "14:00", "14h", "as 9h", "10hs"
-  let timeMatch = t.match(/(?:\bàs|\bas)?\s*(\d{1,2})(?::(\d{2}))?\s*(h|hs)?\b/);
-  let hour = null, minute = null;
-  if (timeMatch) {
-    const { hour: h, minute: mnt } = normalizeHourMinute(timeMatch[1], timeMatch[2]);
-    hour = h; minute = mnt;
-    console.log('⏰ Horário detectado:', `${hour}:${String(minute).padStart(2, '0')}`);
-  } else {
-    console.log('❌ Horário não encontrado');
-    return null;
-  }
-
-  const finalHour = hour != null ? hour : 0;
-  const finalMinute = minute != null ? minute : 0;
-  const finalDate = buildBrazilDate(
-    explicitDate.getFullYear(),
-    explicitDate.getMonth(),
-    explicitDate.getDate(),
-    finalHour,
-    finalMinute,
-    0,
-    0
-  );
-
-  if (isNaN(finalDate.getTime())) {
-    console.log('❌ Data final inválida');
-    return null;
-  }
-  
-  console.log('✅ Data final parseada:', finalDate.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
-  return finalDate;
-}
-
-async function tryCancelOrRescheduleFromMessage(message, phoneNumber) {
-  try {
-    const t = (message || '').toLowerCase();
-    const wantsCancel = t.includes('cancelar') || t.includes('cancela') || t.includes('desmarcar');
-    const wantsReschedule = t.includes('remarcar') || t.includes('remarca') || t.includes('alterar') || t.includes('mudar horário') || t.includes('mudar horario');
-    if (!wantsCancel && !wantsReschedule) return null;
-
-    const { findLatestByPhone, findConflicts } = require('../models/agendamento');
-    const latest = await findLatestByPhone(phoneNumber);
-    if (!latest) return null;
-
-    const start = new Date(latest.start_time);
-    const end = new Date(latest.end_time);
-    const humanBase = `${latest.summary} em ${start.toLocaleString('pt-BR')} - ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
-
-    if (wantsCancel) {
-      try {
-        if (latest.calendar_event_id) {
-          const { getAuthClient } = require('../config/google-calendar');
-          const auth = getAuthClient();
-          const calendar = require('googleapis').google.calendar({ version: 'v3', auth });
-          await calendar.events.delete({ calendarId: 'primary', eventId: latest.calendar_event_id });
-        }
-      } catch (err) {
-        console.error('⚠️ Could not delete calendar event:', err.message);
-      }
-      await pool.query('DELETE FROM appointments WHERE id = $1', [latest.id]);
-      return { changed: true, type: 'cancel', humanReadable: humanBase };
-    }
-
-    if (wantsReschedule) {
-      const newDate = parseDateTimeFromText(message);
-      if (!newDate) return null;
-      const duration = end.getTime() - start.getTime();
-      const newEnd = new Date(newDate.getTime() + duration);
-
-      const conflicts = await findConflicts(newDate, newEnd, latest.agenda_type);
-      const conflictsFiltered = conflicts.filter(c => c.id !== latest.id);
-      if (conflictsFiltered.length > 0) return null;
-
-      if (latest.calendar_event_id) {
-        try {
-          const { getAuthClient } = require('../config/google-calendar');
-          const auth = getAuthClient();
-          const calendar = require('googleapis').google.calendar({ version: 'v3', auth });
-          await calendar.events.patch({
-            calendarId: 'primary',
-            eventId: latest.calendar_event_id,
-            resource: {
-              start: { dateTime: newDate.toISOString(), timeZone: 'America/Sao_Paulo' },
-              end: { dateTime: newEnd.toISOString(), timeZone: 'America/Sao_Paulo' },
-            }
-          });
-        } catch (err) {
-          console.error('⚠️ Could not patch calendar event:', err.message);
-        }
-      }
-
-      await pool.query(
-        `UPDATE appointments SET start_time = $2, end_time = $3, updated_at = NOW() WHERE id = $1`,
-        [latest.id, newDate, newEnd]
-      );
-
-      const humanNew = `${latest.summary} em ${newDate.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${newEnd.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`;
-      return { changed: true, type: 'reschedule', humanReadable: humanNew };
-    }
-
-    return null;
-  } catch (err) {
-    console.error('❌ Cancel/Reschedule parse failed:', err.message);
-    return null;
-  }
-}
-
-async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
-  try {
-    const customerName = contact.pushname || contact.name || '';
-    const rawType = inferAgendaTypeFromText(message, metadata?.agendaType);
-    const agendaType = (rawType === 'visita' || rawType === 'presencial') ? 'loja' : rawType;
-    const start = parseDateTimeFromText(message);
-    
-    console.log('\n🔍 === TENTANDO AGENDAR ===');
-    console.log('📝 Mensagem:', message);
-    console.log('📅 Data parseada:', start?.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
-    console.log('🏷️ Tipo de agenda:', agendaType);
-    
-    if (!agendaType || !start) {
-      console.log('❌ Dados insuficientes para agendamento');
-      return null;
-    }
-    const duration = 60;
-    const end = new Date(start.getTime() + duration * 60000);
-
-    console.log('⏰ Horário solicitado:', start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
-    console.log('⏰ Horário fim:', end.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
-
-    // Validar expediente (8-18h, dias úteis) em America/Sao_Paulo
-    const { isWithinWorkingHours, suggestAlternativeTimes } = require('../config/google-calendar');
-    if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
-      console.log('⚠️ FORA DO HORÁRIO DE EXPEDIENTE');
-      let suggestions = [];
-      try {
-        suggestions = await suggestAlternativeTimes(start, duration, { agendaType });
-      } catch (e) {
-        suggestions = [];
-      }
-      return {
-        scheduled: false,
-        reason: 'outside_hours',
-        suggestions: suggestions.map(s => ({
-          start: s.start,
-          end: s.end,
-          formatted: `${s.start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${s.end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`
-        }))
-      };
-    }
-
-    const autoSummary = agendaType === 'online'
-      ? `Atendimento - Reunião Online${customerName ? ` | ${customerName}` : ''}`
-      : `Atendimento - Visita à Loja${customerName ? ` | ${customerName}` : ''}`;
-
-    // Verificar conflitos no banco (mesmo tipo)
-    const { findConflicts } = require('../models/agendamento');
-    const dbConflicts = await findConflicts(start, end, agendaType);
-    
-    console.log('🔍 Conflitos encontrados:', dbConflicts.length);
-    if (dbConflicts.length > 0) {
-      console.log('❌ HORÁRIO JÁ OCUPADO');
-      dbConflicts.forEach(c => {
-        console.log(`   - ${c.summary}: ${new Date(c.start_time).toLocaleString('pt-BR')} - ${new Date(c.end_time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`);
-      });
-      
-      let suggestions = [];
-      try {
-        suggestions = await suggestAlternativeTimes(start, duration, { agendaType });
-        console.log('💡 Sugestões alternativas:', suggestions.length);
-      } catch (e) {
-        suggestions = [];
-      }
-      try {
-        suggestions = await suggestAlternativeTimes(start, duration, { agendaType });
-      } catch (e) {
-        suggestions = [];
-      }
-      return {
-        scheduled: false,
-        reason: 'conflict',
-        suggestions: suggestions.map(s => ({
-          start: s.start,
-          end: s.end,
-          formatted: `${s.start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${s.end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`
-        }))
-      };
-    }
-
-    // Persistir no banco (sem criar evento no Google Calendar) e somente confirmar se salvar com sucesso
-    
-    try {
-      console.log('💾 Salvando agendamento no banco...');
-      await createAppointment({
-        calendarEventId: null,
-        summary: autoSummary,
-        description: '',
-        startTime: start,
-        endTime: end,
-        agendaType,
-        clientName: customerName || null,
-        phoneNumber: phoneNumber || null,
-      });
-      const humanReadable = `${agendaType === 'online' ? 'Reunião online' : 'Visita à loja'} em ${start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`;
-      console.log('✅ AGENDAMENTO CONFIRMADO:', humanReadable);
-      return {
-        scheduled: true,
-        humanReadable,
-        htmlLink: undefined,
-        eventPublic: {
-          id: undefined,
-          summary: autoSummary,
-          start: start.toISOString(),
-          end: end.toISOString(),
-          agendaType,
-          htmlLink: undefined,
-        }
-      };
-    } catch (persistErr) {
-      console.error('⚠️ Could not persist appointment:', persistErr.message);
-      const reason = String(persistErr.message || '').includes('conflict') ? 'conflict' : 'persist_error';
-      return {
-        scheduled: false,
-        reason,
-        suggestions: []
-      };
-    }
-  } catch (err) {
-    console.error('❌ Scheduling from message failed:', err.message);
-    return { scheduled: false, reason: 'error', suggestions: [] };
   }
 }
 
