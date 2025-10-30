@@ -1,19 +1,54 @@
 const {
-  checkTimeSlotAvailability,
   createCalendarEventWithValidation,
-  createCalendarEvent,
   getAuthClient,
 } = require('../config/google-calendar');
+const { google } = require('googleapis');
+const pool = require('../config/database');
 
+async function checkTimeSlotAvailability(startTime, endTime, options = {}) {
+  try {
+    const auth = await getAuthClient();
+    if (!auth) throw new Error('Google Calendar não configurado');
 
+    const calendar = google.calendar({ version: 'v3', auth });
+    const calendarId = options.calendarId || 'primary';
 
+    const response = await calendar.events.list({
+      calendarId,
+      timeMin: startTime.toISOString(),
+      timeMax: endTime.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime',
+      fields: 'items(id,summary,start,end,extendedProperties)',
+    });
 
+    const events = response.data.items || [];
+    const requestedType = String(options.agendaType || '').toLowerCase();
+
+    const conflicts = events.filter(event => {
+      const eventStart = new Date(event.start.dateTime || event.start.date);
+      const eventEnd = new Date(event.end.dateTime || event.end.date);
+      const overlaps = startTime < eventEnd && endTime > eventStart;
+
+      const eventType = (event.extendedProperties?.private?.agendaType || '').toLowerCase();
+      return overlaps && eventType === requestedType;
+    });
+
+    return {
+      available: conflicts.length === 0,
+      conflicts,
+    };
+  } catch (error) {
+    console.error('Error checking time slot availability:', error);
+    throw error;
+  }
+}
 
 async function createGoogleEvent(agendamento) {
   const {
     resumo,
-    tipo, // 'reuniao' | 'visita'
-    data, // Date ou ISO
+    tipo,
+    data,
     duracaoMin = 60,
     cliente_nome,
     cliente_whatsapp,
@@ -30,18 +65,17 @@ async function createGoogleEvent(agendamento) {
   const description = `Cliente: ${cliente_nome || ''}\nWhatsApp: ${cliente_whatsapp || ''}\nTipo: ${tipo}\nLocal: ${local || (String(tipo).toLowerCase() === 'reuniao' ? 'Online' : 'Loja')}`;
 
   const event = await createCalendarEventWithValidation(
-  summary,
-  description,
-  start,
-  end,
-  { durationMinutes: duracaoMin, agendaType: tipo === 'reuniao' ? 'online' : 'visita', clientName: cliente_nome }
-);
+    summary,
+    description,
+    start,
+    end,
+    { durationMinutes: duracaoMin, agendaType: tipo === 'reuniao' ? 'reuniao' : 'visita', clientName: cliente_nome }
+  );
 
-  // Persistir em appointments (mantendo compatibilidade com estrutura atual)
   await pool.query(
     `INSERT INTO appointments (calendar_event_id, summary, description, start_time, end_time, agenda_type, client_name, phone_number, created_at, updated_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())`,
-    [event.id, summary, description, start, end, (tipo === 'reuniao' ? 'online' : 'loja'), cliente_nome || null, cliente_whatsapp || null]
+    [event.id, summary, description, start, end, tipo === 'reuniao' ? 'reuniao' : 'visita', cliente_nome || null, cliente_whatsapp || null]
   );
 
   return event;
@@ -49,13 +83,15 @@ async function createGoogleEvent(agendamento) {
 
 async function deleteGoogleEvent(eventId) {
   try {
-    const auth = getAuthClient();
+    const auth = await getAuthClient();
+    if (!auth) throw new Error('Falha ao autenticar no Google Calendar');
     const calendar = google.calendar({ version: 'v3', auth });
     await calendar.events.delete({ calendarId: 'primary', eventId });
     await pool.query(`DELETE FROM appointments WHERE calendar_event_id = $1`, [eventId]);
+    console.log(`🗑️ Evento ${eventId} removido do Google Calendar e do banco.`);
     return true;
   } catch (err) {
-    console.error('❌ deleteGoogleEvent error:', err.message);
+    console.error('❌ Erro ao excluir evento do Google Calendar:', err.message);
     throw err;
   }
 }
@@ -69,7 +105,7 @@ async function listUpcomingEvents(options = {}) {
     limit = 500,
     from,
     to,
-    tipo, // 'visita' | 'reuniao' | undefined
+    tipo,
     order = 'ASC',
   } = options || {};
 
@@ -84,12 +120,9 @@ async function listUpcomingEvents(options = {}) {
     params.push(new Date(to));
     clauses.push(`start_time <= $${params.length}`);
   }
-  if (tipo === 'reuniao') {
-    params.push('online');
+  if (tipo) {
+    params.push(tipo);
     clauses.push(`agenda_type = $${params.length}`);
-  } else if (tipo === 'visita') {
-    params.push(['loja', 'visita', 'presencial']);
-    clauses.push(`agenda_type = ANY($${params.length})`);
   }
 
   const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -99,10 +132,10 @@ async function listUpcomingEvents(options = {}) {
         id,
         client_name AS cliente_nome,
         phone_number AS cliente_whatsapp,
-        CASE WHEN agenda_type='online' THEN 'reuniao' ELSE 'visita' END AS tipo,
+        agenda_type AS tipo,
         start_time AS data,
         end_time   AS fim,
-        CASE WHEN agenda_type='online' THEN 'Online' ELSE 'Av. Almirante Barroso, 389, Centro – João Pessoa – PB' END AS local,
+        CASE WHEN agenda_type='reuniao' THEN 'Online' ELSE 'Av. Almirante Barroso, 389, Centro – João Pessoa – PB' END AS local,
         calendar_event_id AS google_event_id,
         summary AS resumo
       FROM appointments
@@ -112,7 +145,6 @@ async function listUpcomingEvents(options = {}) {
     params
   );
 
-  // Acrescentar campos em BR para facilitar debug no front
   return result.rows.map(r => ({
     ...r,
     data_br: toBr(r.data),
@@ -120,11 +152,54 @@ async function listUpcomingEvents(options = {}) {
   }));
 }
 
+/**
+ * ✅ Cancela o agendamento no banco **e** no Google Calendar.
+ */
+async function cancelAppointment({ data, tipo }) {
+  try {
+    if (!data || !tipo) {
+      throw new Error('Data e tipo são obrigatórios para cancelar um agendamento.');
+    }
+
+    const start = new Date(data);
+    const tipoAgenda = tipo.toLowerCase();
+
+    const { rows } = await pool.query(
+      `SELECT calendar_event_id 
+         FROM appointments 
+        WHERE agenda_type = $1 
+          AND start_time = $2
+        LIMIT 1`,
+      [tipoAgenda, start]
+    );
+
+    if (rows.length === 0) {
+      console.log('⚠️ Nenhum agendamento encontrado para cancelar.');
+      return { success: false, message: 'Nenhum agendamento encontrado.' };
+    }
+
+    const eventId = rows[0].calendar_event_id;
+
+    const auth = await getAuthClient();
+    if (!auth) throw new Error('Falha ao autenticar no Google Calendar');
+
+    const calendar = google.calendar({ version: 'v3', auth });
+    await calendar.events.delete({ calendarId: 'primary', eventId });
+
+    await pool.query(`DELETE FROM appointments WHERE calendar_event_id = $1`, [eventId]);
+
+    console.log(`✅ Agendamento cancelado (Google + Banco): tipo=${tipo}, data=${start.toISOString()}`);
+    return { success: true, message: 'Agendamento cancelado com sucesso.' };
+  } catch (err) {
+    console.error('❌ Erro ao cancelar agendamento:', err.message);
+    return { success: false, message: err.message };
+  }
+}
+
 module.exports = {
-  checkAvailability: checkTimeSlotAvailability,
+  checkTimeSlotAvailability,
   createGoogleEvent,
   deleteGoogleEvent,
   listUpcomingEvents,
+  cancelAppointment, // 👈 AGORA ESTÁ EXPORTADA CORRETAMENTE
 };
-
-

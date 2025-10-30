@@ -3,13 +3,26 @@ const pool = require('../config/database');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+
+// --- Imports Atualizados ---
+// Assumindo que todas estas funções existem nos seus arquivos de config
 const {
-  createCalendarEventWithValidation,
-  checkTimeSlotAvailability,
+  createCalendarEvent,
+  deleteCalendarEvent,
+  updateCalendarEvent,
+  checkTimeSlotAvailability, // Esta não está sendo usada diretamente nos handlers, mas `isWithinWorkingHours` e `suggestAlternativeTimes` sim
   suggestAlternativeTimes,
   isWithinWorkingHours,
 } = require('../config/google-calendar');
-const { createAppointment, findConflicts } = require('../models/agendamento');
+
+const {
+  createAppointment,
+  findConflicts,
+  findLatestByPhone,
+  updateAppointment,
+} = require('../models/agendamento');
+// -------------------------
+
 const OpenAI = require('openai');
 
 const openai = new OpenAI({
@@ -23,9 +36,10 @@ let pausedUntil = null;
 let initializationAttempt = 0;
 let chatPauses = new Map();
 
-// ========== FERRAMENTAS DO GOOGLE CALENDAR ==========
+// ========== FERRAMENTAS DO GOOGLE CALENDAR (ATUALIZADAS) ==========
 
 const calendarTools = [
+  // Ferramenta 1: Verificar Disponibilidade
   {
     type: 'function',
     function: {
@@ -36,7 +50,7 @@ const calendarTools = [
         properties: {
           data: {
             type: 'string',
-            description: 'Data no formato DD/MM/AAAA',
+            description: 'Data no formato DD/MM/AAAA (ou "hoje", "amanhã")',
           },
           horario: {
             type: 'string',
@@ -52,6 +66,7 @@ const calendarTools = [
       },
     },
   },
+  // Ferramenta 2: Sugerir Horários
   {
     type: 'function',
     function: {
@@ -62,7 +77,7 @@ const calendarTools = [
         properties: {
           data: {
             type: 'string',
-            description: 'Data desejada no formato DD/MM/AAAA',
+            description: 'Data desejada no formato DD/MM/AAAA (ou "hoje", "amanhã")',
           },
           tipo: {
             type: 'string',
@@ -74,6 +89,7 @@ const calendarTools = [
       },
     },
   },
+  // Ferramenta 3: Criar Agendamento
   {
     type: 'function',
     function: {
@@ -88,7 +104,7 @@ const calendarTools = [
           },
           data: {
             type: 'string',
-            description: 'Data do agendamento no formato DD/MM/AAAA',
+            description: 'Data do agendamento no formato DD/MM/AAAA (ou "hoje", "amanhã")',
           },
           horario: {
             type: 'string',
@@ -109,17 +125,62 @@ const calendarTools = [
       },
     },
   },
+  // Ferramenta 4: Buscar Último Agendamento (NOVA)
+  {
+    type: 'function',
+    function: {
+      name: 'buscar_ultimo_agendamento',
+      description: 'Busca o último agendamento ativo do cliente. Essencial antes de editar ou cancelar.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  // Ferramenta 5: Editar Agendamento (NOVA)
+  {
+    type: 'function',
+    function: {
+      name: 'editar_agendamento',
+      description: 'Altera um agendamento existente para uma nova data e/ou horário, após a disponibilidade ser confirmada.',
+      parameters: {
+        type: 'object',
+        properties: {
+          eventId: {
+            type: 'string',
+            description: "O ID do evento a ser modificado (obtido de 'buscar_ultimo_agendamento').",
+          },
+          nova_data: {
+            type: 'string',
+            description: 'A nova data no formato DD/MM/AAAA (ou "hoje", "amanhã").',
+          },
+          novo_horario: {
+            type: 'string',
+            description: 'O novo horário no formato HH:MM.',
+          },
+          duracao: {
+            type: 'number',
+            description: 'Duração em minutos (padrão 60).',
+            default: 60,
+          },
+        },
+        required: ['eventId', 'nova_data', 'novo_horario'],
+      },
+    },
+  },
+  // Ferramenta 6: Cancelar Agendamento (Lógica alterada no handler)
   {
     type: 'function',
     function: {
       name: 'cancelar_agendamento',
-      description: 'Cancela o último agendamento do cliente',
+      description: 'Cancela o último agendamento do cliente (requer confirmação prévia da IA)',
       parameters: {
         type: 'object',
         properties: {
           confirmar: {
             type: 'boolean',
-            description: 'Confirmação do cancelamento',
+            description: 'Confirmação (true) de que o cliente deseja cancelar. A IA deve obter essa confirmação antes de chamar a ferramenta.',
           },
         },
         required: ['confirmar'],
@@ -128,47 +189,76 @@ const calendarTools = [
   },
 ];
 
+
 // ========== HANDLERS DAS FERRAMENTAS ==========
 
 function parseBrazilDateTime(dateStr, timeStr) {
   // Tratamento de datas relativas
   const today = new Date();
-  const brazilOffset = -3; // UTC-3
-  
-  // Ajustar para timezone do Brasil
-  const brazilNow = new Date(today.getTime() + (brazilOffset * 60 * 60 * 1000));
+  // Obtém a data/hora *atual* no fuso de São Paulo (BRT/UTC-3)
+  const brazilNow = new Date(today.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
   
   let day, month, year;
-  
-  // Detectar "amanhã", "hoje", etc.
   const lowerDate = dateStr.toLowerCase().trim();
-  
+
   if (lowerDate.includes('amanhã') || lowerDate.includes('amanha')) {
     const tomorrow = new Date(brazilNow);
     tomorrow.setDate(tomorrow.getDate() + 1);
     day = tomorrow.getDate();
-    month = tomorrow.getMonth() + 1;
+    month = tomorrow.getMonth() + 1; // Meses são 0-11
     year = tomorrow.getFullYear();
     console.log(`📅 Detectado "amanhã" → ${day}/${month}/${year}`);
   } else if (lowerDate.includes('hoje')) {
     day = brazilNow.getDate();
-    month = brazilNow.getMonth() + 1;
+    month = brazilNow.getMonth() + 1; // Meses são 0-11
     year = brazilNow.getFullYear();
     console.log(`📅 Detectado "hoje" → ${day}/${month}/${year}`);
   } else {
     // Formato DD/MM ou DD/MM/AAAA
     const parts = dateStr.split('/').map(Number);
+    if (parts.length < 2 || isNaN(parts[0]) || isNaN(parts[1])) {
+        throw new Error("Formato de data inválido. Use DD/MM/AAAA ou DD/MM.");
+    }
     day = parts[0];
     month = parts[1];
-    year = parts[2] || new Date().getFullYear();
+    year = parts[2] || brazilNow.getFullYear();
+    
+    // Se o ano for 2 dígitos (ex: 25), assume 2025
+    if (year < 100) {
+        year += 2000;
+    }
+    
+    // Se a data/mês for no passado este ano (e não foi fornecido ano), assume próximo ano
+    // Ex: hoje é 30/10/2025, usuário digita 15/01 -> assume 15/01/2026
+    const parsedDateForYearCheck = new Date(year, month - 1, day);
+    // Compara apenas a data, ignorando a hora
+    const todayDateOnly = new Date(brazilNow.getFullYear(), brazilNow.getMonth(), brazilNow.getDate());
+    
+    if (parsedDateForYearCheck < todayDateOnly && parts.length === 2) {
+        year += 1;
+        console.log(`📅 Data no passado, assumindo próximo ano: ${year}`);
+    }
   }
-  
+
   const [hour, minute] = timeStr.split(':').map(Number);
+  if (isNaN(hour) || isNaN(minute)) {
+      throw new Error("Formato de horário inválido. Use HH:MM.");
+  }
+
+  console.log(`🕐 Parseando: ${day}/${month}/${year} ${hour}:${minute} (Horário de Brasília)`);
+
+  // O Google Calendar API espera datas em UTC (formato ISO 8601).
+  // Criamos a data como se fosse UTC, mas com a hora de Brasília.
+  // O fuso de Brasília é UTC-3. Então, 10:00 BRL = 13:00 UTC.
+  // A função Date.UTC trata os argumentos como UTC.
+  const utcDate = new Date(Date.UTC(year, month - 1, day, hour + 3, minute, 0, 0));
   
-  console.log(`🕐 Parseando: ${day}/${month}/${year} ${hour}:${minute}`);
-  
-  // Criar data em UTC ajustando para Brasil (UTC-3)
-  return new Date(Date.UTC(year, month - 1, day, hour + 3, minute, 0, 0));
+  if (isNaN(utcDate.getTime())) {
+      throw new Error(`Data/hora inválida: ${day}/${month}/${year} ${hour}:${minute}`);
+  }
+
+  console.log(`🌎 Data UTC gerada: ${utcDate.toISOString()}`);
+  return utcDate;
 }
 
 async function handleVerificarDisponibilidade(args) {
@@ -178,7 +268,7 @@ async function handleVerificarDisponibilidade(args) {
     const start = parseBrazilDateTime(data, horario);
     const end = new Date(start.getTime() + 60 * 60000); // +1 hora
     
-    // Validar horário de trabalho
+    // Validar horário de trabalho (isWithinWorkingHours deve receber a data UTC)
     if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
       return {
         disponivel: false,
@@ -207,7 +297,7 @@ async function handleVerificarDisponibilidade(args) {
     console.error('❌ Erro ao verificar disponibilidade:', error);
     return {
       erro: true,
-      mensagem: 'Erro ao verificar disponibilidade. Por favor, tente novamente.',
+      mensagem: `Erro ao verificar disponibilidade: ${error.message}. Por favor, peça para o cliente tentar novamente.`,
     };
   }
 }
@@ -219,6 +309,7 @@ async function handleSugerirHorarios(args) {
     // Usar meio-dia como referência para buscar horários disponíveis
     const referenceDate = parseBrazilDateTime(data, '12:00');
     
+    // suggestAlternativeTimes deve retornar datas UTC
     const suggestions = await suggestAlternativeTimes(referenceDate, 60, { agendaType: tipo });
     
     if (suggestions.length === 0) {
@@ -228,10 +319,11 @@ async function handleSugerirHorarios(args) {
       };
     }
     
+    // Formatar as sugestões de volta para o fuso de Brasília para o usuário
     const formatted = suggestions.slice(0, 3).map(s => ({
-      data: s.start.toLocaleDateString('pt-BR'),
-      horario: s.start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-      fim: s.end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      data: s.start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }),
+      horario: s.start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }),
+      fim: s.end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }),
     }));
     
     return {
@@ -242,7 +334,7 @@ async function handleSugerirHorarios(args) {
     console.error('❌ Erro ao sugerir horários:', error);
     return {
       erro: true,
-      mensagem: 'Erro ao buscar horários. Por favor, tente novamente.',
+      mensagem: `Erro ao buscar horários: ${error.message}. Por favor, tente novamente.`,
     };
   }
 }
@@ -267,8 +359,9 @@ async function handleCriarAgendamento(args, phoneNumber) {
     if (conflicts.length > 0) {
       // Sugerir alternativas
       const suggestions = await suggestAlternativeTimes(start, duracao, { agendaType: tipo });
+      // Formatar sugestões para fuso de Brasília
       const formatted = suggestions.slice(0, 2).map(s => 
-        `${s.start.toLocaleDateString('pt-BR')} às ${s.start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
+        `${s.start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })} às ${s.start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`
       ).join('\n• ');
       
       return {
@@ -291,7 +384,7 @@ async function handleCriarAgendamento(args, phoneNumber) {
     let htmlLink = null;
     
     try {
-      const { createCalendarEvent } = require('../config/google-calendar');
+      // `start` e `end` já estão em UTC, corretos para a API
       const calendarEvent = await createCalendarEvent(
         summary,
         description,
@@ -307,10 +400,15 @@ async function handleCriarAgendamento(args, phoneNumber) {
       console.log('🔗 Link:', htmlLink);
     } catch (calendarError) {
       console.error('⚠️ Erro ao criar no Google Calendar:', calendarError.message);
-      console.log('💾 Continuando apenas com banco de dados...');
+      // Parar a execução se o Google Calendar falhar é uma boa prática
+      return {
+        sucesso: false,
+        mensagem: `Tive um problema ao tentar agendar no Google Calendar: ${calendarError.message}. Não posso continuar com o agendamento.`,
+      };
     }
     
     // 2. SALVAR NO BANCO
+    // Salvar a data UTC no banco
     await createAppointment({
       calendarEventId,
       summary,
@@ -321,9 +419,12 @@ async function handleCriarAgendamento(args, phoneNumber) {
       clientName: cliente_nome,
       phoneNumber,
     });
+    console.log('✅ Evento salvo no banco de dados local.');
+
     
-    const dataFormatted = start.toLocaleDateString('pt-BR');
-    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    // Formatar a data/hora de volta para Brasília para exibir ao usuário
+    const dataFormatted = start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
     const tipoFormatted = tipo === 'online' ? 'Reunião online' : 'Visita à loja';
     
     let linkText = '';
@@ -346,14 +447,163 @@ async function handleCriarAgendamento(args, phoneNumber) {
     console.error('❌ Erro ao criar agendamento:', error);
     return {
       sucesso: false,
-      mensagem: 'Erro ao confirmar o agendamento. Por favor, tente novamente.',
+      mensagem: `Erro ao confirmar o agendamento: ${error.message}.`,
     };
   }
 }
 
-async function handleCancelarAgendamento(phoneNumber) {
+// NOVO HANDLER
+async function handleBuscarUltimoAgendamento(args, phoneNumber) {
   try {
-    const { findLatestByPhone } = require('../models/agendamento');
+    const latest = await findLatestByPhone(phoneNumber);
+    
+    if (!latest) {
+      return {
+        sucesso: false,
+        mensagem: 'Não encontrei nenhum agendamento ativo em seu nome.',
+      };
+    }
+
+    // `latest.start_time` vem do banco (assumindo estar em UTC)
+    const start = new Date(latest.start_time);
+    const dataFormatted = start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+
+    return {
+      sucesso: true,
+      mensagem: 'Encontrei este agendamento:',
+      evento: {
+        id: latest.calendar_event_id, // ID do Google Calendar
+        summary: latest.summary,
+        data: dataFormatted,
+        horario: horaFormatted,
+        tipo: latest.agenda_type,
+        db_id: latest.id, // ID do banco de dados local
+      },
+    };
+  } catch (error) {
+    console.error('❌ Erro ao buscar último agendamento:', error);
+    return {
+      sucesso: false,
+      mensagem: `Erro ao buscar seu agendamento: ${error.message}.`,
+    };
+  }
+}
+
+// NOVO HANDLER
+async function handleEditarAgendamento(args, phoneNumber) {
+  try {
+    const { eventId, nova_data, novo_horario, duracao = 60 } = args;
+
+    // 1. Buscar dados atuais do evento (tipo, nome, etc.) pelo ID do DB
+    // Usamos o eventId do Google para garantir que estamos editando o correto
+    const result = await pool.query('SELECT * FROM appointments WHERE calendar_event_id = $1 AND phone_number = $2', [eventId, phoneNumber]);
+
+    if (result.rows.length === 0) {
+       return { 
+            sucesso: false, 
+            mensagem: 'Não consegui encontrar o agendamento original para editar. Por favor, tente cancelar e agendar novamente.'
+        };
+    }
+    
+    const latest = result.rows[0];
+    const tipo = latest.agenda_type;
+    const cliente_nome = latest.client_name;
+
+    // 2. Validar novo horário
+    const start = parseBrazilDateTime(nova_data, novo_horario);
+    const end = new Date(start.getTime() + duracao * 60000);
+
+    if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
+      return {
+        sucesso: false,
+        mensagem: 'O novo horário está fora do expediente (8h às 18h, seg a sex).',
+      };
+    }
+
+    // 3. Verificar conflitos
+    const conflicts = await findConflicts(start, end, tipo);
+    if (conflicts.length > 0) {
+        // Ignorar conflito se for o próprio evento que estamos editando
+        // Se houver mais de 1 conflito, ou se o conflito for com um ID *diferente*
+        if (conflicts.length > 1 || conflicts[0].calendar_event_id !== eventId) {
+             return {
+                sucesso: false,
+                mensagem: 'Este novo horário já está ocupado por outro cliente.',
+            };
+        }
+        console.log(`ℹ️ Conflito encontrado é com o próprio evento (${eventId}). Ignorando.`);
+    }
+
+    // 4. Atualizar no Google Calendar
+    const summary = tipo === 'online' 
+      ? `Atendimento - Reunião Online | ${cliente_nome}`
+      : `Atendimento - Visita à Loja | ${cliente_nome}`;
+    
+    const description = `Cliente: ${cliente_nome}\nWhatsApp: ${phoneNumber}\nTipo: ${tipo === 'online' ? 'Reunião Online' : 'Visita à Loja'}\n(EVENTO REAGENDADO)`;
+
+    console.log(`🔄 Atualizando evento no Google Calendar: ${eventId}`);
+    
+    let htmlLink = null;
+    try {
+        // `start` e `end` estão em UTC
+        const updatedEvent = await updateCalendarEvent(
+            eventId,
+            summary,
+            description,
+            start,
+            end,
+            { agendaType: tipo, clientName: cliente_nome }
+        );
+        htmlLink = updatedEvent.htmlLink;
+        console.log('✅ Evento atualizado no Google Calendar');
+    } catch (calendarError) {
+        console.error('⚠️ Erro ao ATUALIZAR no Google Calendar:', calendarError.message);
+        return {
+            sucesso: false,
+            mensagem: `Tive um problema ao tentar reagendar no Google Calendar: ${calendarError.message}. O agendamento antigo foi mantido.`,
+        };
+    }
+    
+    // 5. Atualizar no Banco de Dados Local
+    // Salvar as datas UTC atualizadas
+    await updateAppointment(latest.id, {
+      summary,
+      description,
+      startTime: start,
+      endTime: end,
+    });
+    console.log('✅ Evento atualizado no banco de dados local');
+
+    // Formatar para Brasília para exibir ao usuário
+    const dataFormatted = start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
+
+    return {
+      sucesso: true,
+      mensagem: `✅ Agendamento reagendado com sucesso!\n\nNovo horário: ${dataFormatted} às ${horaFormatted}\n🔗 Link: ${htmlLink || '(link não alterado)'}`,
+    };
+  } catch (error) {
+    console.error('❌ Erro ao editar agendamento:', error);
+    return {
+      sucesso: false,
+      mensagem: `Erro ao reagendar: ${error.message}.`,
+    };
+  }
+}
+
+
+// HANDLER MODIFICADO
+async function handleCancelarAgendamento(args, phoneNumber) {
+  // O argumento 'confirmar' é apenas para a IA garantir que o usuário confirmou.
+  if (!args.confirmar) {
+      return {
+          sucesso: false,
+          mensagem: "O cancelamento não foi confirmado pela IA."
+      }
+  }
+
+  try {
     const latest = await findLatestByPhone(phoneNumber);
     
     if (!latest) {
@@ -363,12 +613,29 @@ async function handleCancelarAgendamento(phoneNumber) {
       };
     }
     
-    // Remover do banco
+    // 1. Remover do Google Calendar
+    if (latest.calendar_event_id) {
+      console.log(`🗑️ Deletando evento do Google Calendar: ${latest.calendar_event_id}`);
+      try {
+        await deleteCalendarEvent(latest.calendar_event_id);
+        console.log('✅ Evento deletado do Google Calendar');
+      } catch (calendarError) {
+        console.error('⚠️ Erro ao DELETAR do Google Calendar:', calendarError.message);
+        // Não parar o processo, apenas logar. O mais importante é liberar o slot no DB local.
+        // Pode ser que o evento já tenha sido deletado manualmente no GCalendar.
+      }
+    } else {
+      console.log('⚠️ Agendamento local não tinha ID do Google Calendar. Removendo apenas localmente.');
+    }
+
+    // 2. Remover do banco de dados local
     await pool.query('DELETE FROM appointments WHERE id = $1', [latest.id]);
+    console.log('✅ Evento deletado do banco de dados local');
     
+    // Formatar data/hora (que estava em UTC) para Brasília
     const start = new Date(latest.start_time);
-    const dataFormatted = start.toLocaleDateString('pt-BR');
-    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const dataFormatted = start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
     
     return {
       sucesso: true,
@@ -378,19 +645,32 @@ async function handleCancelarAgendamento(phoneNumber) {
     console.error('❌ Erro ao cancelar agendamento:', error);
     return {
       sucesso: false,
-      mensagem: 'Erro ao cancelar o agendamento. Por favor, tente novamente.',
+      mensagem: `Erro ao cancelar o agendamento: ${error.message}.`,
     };
   }
 }
 
-// ========== PROCESSAMENTO DE FUNCTION CALLING ==========
+// ========== PROCESSAMENTO DE FUNCTION CALLING (ATUALIZADO) ==========
 
 async function processFunctionCalls(toolCalls, phoneNumber) {
   const results = [];
   
   for (const toolCall of toolCalls) {
     const functionName = toolCall.function.name;
-    const args = JSON.parse(toolCall.function.arguments);
+    let args;
+    try {
+        args = JSON.parse(toolCall.function.arguments);
+    } catch (error) {
+        console.error(`❌ Erro ao parsear argumentos para ${functionName}: ${toolCall.function.arguments}`);
+        results.push({
+            tool_call_id: toolCall.id,
+            role: 'tool',
+            name: functionName,
+            content: JSON.stringify({ erro: true, mensagem: `Erro interno: Argumentos da função malformados. ${error.message}` }),
+        });
+        continue; // Pula para a próxima toolCall
+    }
+
     
     console.log(`🔧 Executando ferramenta: ${functionName}`, args);
     
@@ -406,11 +686,17 @@ async function processFunctionCalls(toolCalls, phoneNumber) {
       case 'criar_agendamento':
         result = await handleCriarAgendamento(args, phoneNumber);
         break;
-      case 'cancelar_agendamento':
-        result = await handleCancelarAgendamento(phoneNumber);
+      case 'buscar_ultimo_agendamento': // NOVO
+        result = await handleBuscarUltimoAgendamento(args, phoneNumber);
+        break;
+      case 'editar_agendamento': // NOVO
+        result = await handleEditarAgendamento(args, phoneNumber);
+        break;
+      case 'cancelar_agendamento': // Modificado
+        result = await handleCancelarAgendamento(args, phoneNumber);
         break;
       default:
-        result = { erro: true, mensagem: 'Função não reconhecida' };
+        result = { erro: true, mensagem: `Função desconhecida: ${functionName}` };
     }
     
     results.push({
@@ -424,110 +710,81 @@ async function processFunctionCalls(toolCalls, phoneNumber) {
   return results;
 }
 
-// ========== GERAÇÃO DE RESPOSTA COM FUNCTION CALLING ==========
+// ========== GERAÇÃO DE RESPOSTA COM FUNCTION CALLING (PROMPT ATUALIZADO) ==========
 
 async function generateChatbotResponse(message, stateObj, contact, phoneNumber) {
   const { state, metadata } = stateObj;
   const customerName = contact.pushname || contact.name || 'Cliente';
+  const dataAtual = new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  const anoAtual = new Date().getFullYear();
 
   const systemPrompt = `
-Você é **Maria**, assistente virtual da **Artestofados**, empresa especializada em fabricação, reforma e personalização de estofados em **João Pessoa - PB**. 🛋️
+Você é *Maria*, assistente virtual da Artestofados, empresa especializada em fabricação, reforma e personalização de estofados em *João Pessoa - PB*. 🛋️
 
-🎯 **PAPEL**
-Atender clientes com simpatia, responder apenas perguntas **relacionadas à Artestofados**, e **executar as ferramentas** de agendamento quando necessário.
+Data de hoje: ${dataAtual}
+Ano atual: ${anoAtual}
 
-📌 **IMPORTANTE**
+🎯 PAPEL
+Atender clientes com simpatia, responder *apenas* perguntas relacionadas à Artestofados, e executar as ferramentas de agendamento (criar, editar, cancelar) de forma precisa.
+
+📌 IMPORTANTE
 Você só deve responder mensagens que tenham relação com:
 - produtos, serviços e preços da Artestofados
 - fabricação, reforma ou personalização de estofados
 - horários, orçamentos e agendamentos
 - informações sobre localização, atendimento e contato da loja
 
-❌ **SE O CLIENTE PERGUNTAR QUALQUER OUTRA COISA (fora da Artestofados)**:
-- Responda educadamente que só pode ajudar com assuntos da Artestofados.
-- Exemplo: "Posso te ajudar apenas com informações e serviços da Artestofados, tudo bem? 💙"
+❌ SE O CLIENTE PERGUNTAR QUALQUER OUTRA COISA (fora da Artestofados):
+Responda educadamente: "Desculpe, posso te ajudar apenas com informações e serviços da Artestofados, tudo bem? 💙"
 
-📅 **REGRAS DE AGENDAMENTO**
+---
+📅 REGRAS DE AGENDAMENTO (OBRIGATÓRIO SEGUIR OS FLUXOS)
+---
 
-**VOCÊ TEM FERRAMENTAS DISPONÍVEIS - USE-AS SEMPRE!**
+VOCÊ TEM FERRAMENTAS DISPONÍVEIS — USE-AS SEMPRE!
+NÃO avise que vai usar a ferramenta, APENAS USE.
+NÃO invente horários ou disponibilidade.
 
-1. **VERIFICAR DISPONIBILIDADE**
-   - Quando o cliente mencionar uma data/horário, chame IMEDIATAMENTE **"verificar_disponibilidade"**
-   - Exemplo: Cliente diz "amanhã às 10h" → chame a ferramenta agora!
-   - NÃO diga "vou verificar" — EXECUTE a verificação.
+➡️ FLUXO 1: CRIAR NOVO AGENDAMENTO
+1. Cliente pede para agendar ou menciona data/hora.
+2. Chame IMEDIATAMENTE \`verificar_disponibilidade\` com a data, hora e tipo (se não souber o tipo, pergunte primeiro).
+3. [AGUARDE O RESULTADO]
+4. Se disponível: Pergunte o nome completo do cliente (se já não souber).
+5. Com NOME, DATA, HORA e TIPO, chame \`criar_agendamento\`.
+6. [AGUARDE O RESULTADO]
+7. Se ocupado: Chame \`sugerir_horarios\` para a data mencionada.
+8. Repasse a mensagem de sucesso ou erro da ferramenta *exatamente* como ela veio.
 
-2. **CRIAR AGENDAMENTO**
-   - Quando tiver: nome do cliente + data + horário + tipo (online/loja)
-   - Chame IMEDIATAMENTE **"criar_agendamento"**
-   - Aguarde o retorno da ferramenta para confirmar ao cliente.
+➡️ FLUXO 2: EDITAR/REMARCAR AGENDAMENTO (NOVO)
+1. Cliente pede para "editar", "remarcar" ou "alterar" o horário.
+2. Chame IMEDIATAMENTE \`buscar_ultimo_agendamento\`.
+3. [AGUARDE O RESULTADO]
+4. Mostre o agendamento encontrado e PERGUNTE A NOVA DATA E HORÁRIO. (Ex: "Claro! Encontrei seu agendamento [dados]. Para qual nova data e horário (DD/MM/AAAA HH:MM) você gostaria de alterar?")
+5. Cliente informa a nova data/hora.
+6. Chame \`verificar_disponibilidade\` para a *nova* data/hora.
+7. [AGUARDE O RESULTADO]
+8. Se disponível: Chame \`editar_agendamento\`. (Ex: \`editar_agendamento({ "eventId": "[ID_DO_EVENTO_BUSCADO]", "nova_data": "...", "novo_horario": "..." })\`)
+9. Se ocupado: Chame \`sugerir_horarios\`.
 
-3. **SUGERIR HORÁRIOS**
-   - Se "verificar_disponibilidade" retornar ocupado
-   - Chame automaticamente **"sugerir_horarios"**
-   - NÃO invente horários — use sempre a ferramenta.
+➡️ FLUXO 3: CANCELAR AGENDAMENTO (ATUALIZADO)
+1. Cliente pede para "cancelar".
+2. Chame IMEDIATAMENTE \`buscar_ultimo_agendamento\`.
+3. [AGUARDE O RESULTADO]
+4. Mostre o agendamento encontrado e PEÇA CONFIRMAÇÃO. (Ex: "Encontrei seu agendamento [dados]. Você confirma o cancelamento? (Sim/Não)")
+5. Cliente responde "Sim".
+6. Chame \`cancelar_agendamento({ "confirmar": true })\`.
+7. [AGUARDE O RESULTADO]
+8. Repasse a mensagem de sucesso ou erro da ferramenta.
 
-4. **FORMATO DE DATAS**
-   - Aceite: "amanhã", "31/10", "31/10/2025"
-   - Converta para DD/MM/AAAA antes de chamar a ferramenta
-   - Ano atual: **2025**
+⚠️ FORMATO DE DATAS E HORÁRIOS
+- Aceite datas relativas como "hoje" e "amanhã" e passe-as *diretamente* para as ferramentas (elas sabem tratar).
+- Se o cliente passar uma data como "dia 30" ou "sexta-feira", peça o formato completo: "Por favor, me informe a data completa (DD/MM/AAAA) e o horário (HH:MM)."
 
-5. **TIPOS DE AGENDAMENTO**
-   - "online" → reunião virtual
-   - "loja" → visita presencial
-
-⚠️ **COMPORTAMENTO OBRIGATÓRIO**
-
-❌ **NUNCA FAÇA ISSO:**
-- “Vou verificar a disponibilidade” (sem chamar a ferramenta)
-- “Vou criar seu agendamento” (sem chamar a ferramenta)
-- Confirmar horários sem ter verificado
-- Responder antes de receber o resultado da ferramenta
-
-✅ **SEMPRE FAÇA ISSO:**
-- Cliente menciona horário → chame **verificar_disponibilidade**
-- Todos os dados prontos → chame **criar_agendamento**
-- Horário ocupado → chame **sugerir_horarios**
-- Espere o RESULTADO da ferramenta antes de responder.
-
-💬 **TOM E PERSONALIDADE**
-- Amigável, calorosa e empática 💙  
-- Fale de forma simples e natural  
-- Use emojis com moderação  
-- Seja paciente, prestativa e sempre educada  
-- Nunca discuta, apenas redirecione para o contexto da Artestofados
-
-Exemplo de resposta fora do contexto:
-> "Desculpe, posso te ajudar apenas com informações e serviços da Artestofados, tudo bem? 💙"
-
-🧭 **FLUXO COMPLETO**
-
-**EXEMPLO CORRETO:**
-
-Cliente: "Quero agendar para amanhã às 10h"
-Você: [CHAMA verificar_disponibilidade("31/10/2025", "10:00", "loja")]
-[AGUARDA RESULTADO]
-Resultado: {"disponivel": true}
-Você: "Ótimo! Às 10h está livre. Qual seu nome completo?"
-Cliente: "João Silva"
-Você: [CHAMA criar_agendamento("João Silva", "31/10/2025", "10:00", "loja", 60)]
-[AGUARDA RESULTADO]
-Resultado: {"sucesso": true, "mensagem": "✅ Agendamento confirmado!..."}
-Você: [REPETE a mensagem de confirmação do resultado]
-
-**EXEMPLO INCORRETO:**
-
-Cliente: "Quero agendar para amanhã às 10h"
-Você: "Vou verificar a disponibilidade para você! Um momento." ❌
-[NÃO CHAMOU A FERRAMENTA]
-
-🏢 **INFORMAÇÕES**
-- Endereço: Av. Almirante Barroso, 389, Centro – João Pessoa – PB
-- Horário: Segunda a sexta, 8:00 às 18:00
-- Ano atual: 2025
-
-🔑 **LEMBRE-SE**
-Você tem FERRAMENTAS poderosas. Quando souber o que fazer, EXECUTE imediatamente. Não avise que vai executar - EXECUTE!
+🏢 INFORMAÇÕES
+Endereço: Av. Almirante Barroso, 389, Centro – João Pessoa – PB
+Horário: Segunda a sexta, 8:00 às 18:00
 `;
+;
 
   const conversation = [{ role: 'system', content: systemPrompt }];
 
@@ -544,11 +801,11 @@ Você tem FERRAMENTAS poderosas. Quando souber o que fazer, EXECUTE imediatament
     
     // Primeira chamada - pode retornar tool_calls
     let completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4o-mini', // Recomendo usar um modelo mais robusto se possível, como gpt-4o
       messages: conversation,
       tools: calendarTools,
       tool_choice: 'auto', // Deixar a IA decidir
-      temperature: 0.7,
+      temperature: 0.2, // Baixa temperatura para seguir regras
       max_tokens: 800,
     });
 
@@ -561,8 +818,8 @@ Você tem FERRAMENTAS poderosas. Quando souber o que fazer, EXECUTE imediatament
     
     conversation.push(responseMessage);
 
-    // Se há tool_calls, processar
-    if (responseMessage.tool_calls) {
+    // Loop para processar múltiplos tool_calls se necessário (embora 'auto' geralmente chame um de cada vez)
+    while (responseMessage.tool_calls) {
       console.log(`🔧 ${responseMessage.tool_calls.length} ferramenta(s) chamada(s):`);
       responseMessage.tool_calls.forEach(tc => {
         console.log(`   - ${tc.function.name}(${tc.function.arguments})`);
@@ -577,25 +834,29 @@ Você tem FERRAMENTAS poderosas. Quando souber o que fazer, EXECUTE imediatament
       
       conversation.push(...toolResults);
 
-      // Segunda chamada - com resultados das ferramentas
-      console.log('🤖 Fazendo segunda chamada com resultados...');
+      // Próxima chamada - com resultados das ferramentas
+      console.log('🤖 Fazendo próxima chamada com resultados...');
       completion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
         messages: conversation,
-        temperature: 0.7,
+        tools: calendarTools,
+        tool_choice: 'auto',
+        temperature: 0.2,
         max_tokens: 800,
       });
 
       responseMessage = completion.choices[0].message;
-      console.log('✅ Segunda resposta (final):', responseMessage.content?.substring(0, 100));
-    } else {
-      console.log('⚠️ Nenhuma ferramenta foi chamada na primeira resposta');
-    }
+      console.log('📨 Próxima resposta da IA:');
+      console.log('  - Tem tool_calls?', !!responseMessage.tool_calls);
+      console.log('  - Conteúdo (final?):', responseMessage.content?.substring(0, 100));
+      
+      conversation.push(responseMessage);
+    } 
 
     const response = responseMessage.content;
     
     if (!response) {
-      console.error('❌ Resposta vazia da IA!');
+      console.error('❌ Resposta vazia da IA após processar ferramentas!');
       return {
         response: 'Desculpe, tive um problema ao processar sua mensagem. Pode repetir?',
         nextState: state,
@@ -605,17 +866,20 @@ Você tem FERRAMENTAS poderosas. Quando souber o que fazer, EXECUTE imediatament
     
     console.log('✅ Resposta final gerada:', response.substring(0, 100) + '...');
 
-    // Atualizar histórico
+    // Atualizar histórico (apenas a resposta final da IA)
     if (!metadata.history) metadata.history = [];
-    metadata.history.push(
-      { role: 'user', content: message },
-      { role: 'assistant', content: response }
-    );
-
-    // Limitar histórico a 10 mensagens
+    
+    // Limpar histórico antigo se ficar muito grande
     if (metadata.history.length > 20) {
       metadata.history = metadata.history.slice(-20);
     }
+    
+    // Adicionar a última interação (pergunta do usuário + resposta final da IA)
+    metadata.history.push(
+      { role: 'user', content: message },
+      { role: 'assistant', content: response } 
+    );
+
 
     if (!metadata.customerName && customerName !== 'Cliente') {
       metadata.customerName = customerName;
@@ -630,7 +894,7 @@ Você tem FERRAMENTAS poderosas. Quando souber o que fazer, EXECUTE imediatament
     console.error('Stack:', error.stack);
     
     return {
-      response: `Olá! 😊 Seja bem-vindo(a) à Artestofados!\n\nEstou com um probleminha técnico no momento, mas um atendente responderá em breve.\n\nComo posso ajudar você hoje?`,
+      response: `Olá! 😊 Seja bem-vindo(a) à Artestofados!\n\nEstou com um probleminha técnico no momento (${error.message}), mas um atendente responderá em breve.\n\nComo posso ajudar você hoje?`,
       nextState: state,
       metadata,
     };
@@ -902,8 +1166,8 @@ async function handleIncomingMessage(msg) {
 async function checkIfEmployee(number) {
   const employees = process.env.EMPLOYEE_NUMBERS?.split(',').map(n => n.trim()) || [];
   const isEmployee = employees.includes(number);
-  console.log('👥 Employee numbers configured:', employees);
-  console.log('🔍 Checking number:', number, '- Result:', isEmployee);
+  // console.log('👥 Employee numbers configured:', employees); // Opcional: remover para logs mais limpos
+  // console.log('🔍 Checking number:', number, '- Result:', isEmployee); // Opcional: remover para logs mais limpos
   return isEmployee;
 }
 
@@ -938,11 +1202,12 @@ async function markChatAsHumanHandled(phoneNumber) {
 async function saveMessage(messageId, fromNumber, body, timestamp) {
   try {
     const tsMs = typeof timestamp === 'number' ? (timestamp * 1000) : Date.now();
+    const tsDate = new Date(tsMs); // Deixamos isso aqui, embora não seja mais usado na query
     await pool.query(
       `INSERT INTO messages (id, from_number, body, timestamp, created_at)
        VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (id) DO NOTHING`,
-      [messageId, fromNumber, body, tsMs]
+      [messageId, fromNumber, body, tsMs] // CORREÇÃO: Passar tsMs (bigint) em vez de tsDate (Date object)
     );
   } catch (error) {
     console.error('❌ Error saving message:', error);
@@ -1067,27 +1332,30 @@ async function sendMessage(phoneNumber, response) {
       ? phoneNumber 
       : `${phoneNumber}@c.us`;
     
-    console.log('📤 Sending to:', chatId);
+    // console.log('📤 Sending to:', chatId); // Opcional: remover para logs mais limpos
     console.log('💬 Message preview:', response.substring(0, 50) + '...');
     
-    try {
-      const chat = await client.getChatById(chatId);
-      if (!chat) {
-        console.error('❌ Chat not found:', chatId);
-        throw new Error('Chat not found');
-      }
-    } catch (chatError) {
-      console.error('❌ Error getting chat:', chatError.message);
-    }
+    // Remover verificação de chat, pois às vezes falha e não é essencial
+    // try {
+    //   const chat = await client.getChatById(chatId);
+    //   if (!chat) {
+    //     console.error('❌ Chat not found:', chatId);
+    //     throw new Error('Chat not found');
+    //   }
+    // } catch (chatError) {
+    //   console.error('❌ Error getting chat:', chatError.message);
+    // }
     
     await client.sendMessage(chatId, response);
     console.log('✅ Message sent successfully!');
   } catch (error) {
     console.error('❌ Error sending message:', error);
     
-    if (error.message.includes('getChat') || error.message.includes('Evaluation failed')) {
-      console.error('🔌 WhatsApp connection lost - marking as disconnected');
+    if (error.message.includes('getChat') || error.message.includes('Evaluation failed') || error.message.includes('protocol error')) {
+      console.error('🔌 WhatsApp connection likely lost - marking as disconnected');
       status = 'disconnected';
+      qrString = ''; // Forçar novo QR
+      client.destroy().catch(err => console.error('Error destroying client after send fail:', err));
       client = null;
     }
     
@@ -1123,6 +1391,7 @@ function resumeChat(phoneNumber) {
 function isPaused(phoneNumber = null) {
   if (pausedUntil) {
     if (Date.now() > pausedUntil.getTime()) {
+      console.log('▶️ Global pause expired, resuming bot');
       pausedUntil = null;
     } else {
       return true;
@@ -1132,6 +1401,7 @@ function isPaused(phoneNumber = null) {
   if (phoneNumber && chatPauses.has(phoneNumber)) {
     const chatPauseUntil = chatPauses.get(phoneNumber);
     if (Date.now() > chatPauseUntil.getTime()) {
+      console.log(`▶️ Chat pause expired for ${phoneNumber}, resuming`);
       chatPauses.delete(phoneNumber);
     } else {
       return true;
