@@ -1,6 +1,7 @@
 const {
   createCalendarEventWithValidation,
   getAuthClient,
+  resolveCalendarId,
 } = require('../config/google-calendar');
 const { google } = require('googleapis');
 const pool = require('../config/database');
@@ -11,7 +12,7 @@ async function checkTimeSlotAvailability(startTime, endTime, options = {}) {
     if (!auth) throw new Error('Google Calendar não configurado');
 
     const calendar = google.calendar({ version: 'v3', auth });
-    const calendarId = options.calendarId || 'primary';
+    const calendarId = resolveCalendarId(options);
 
     const response = await calendar.events.list({
       calendarId,
@@ -86,7 +87,8 @@ async function deleteGoogleEvent(eventId) {
     const auth = await getAuthClient();
     if (!auth) throw new Error('Falha ao autenticar no Google Calendar');
     const calendar = google.calendar({ version: 'v3', auth });
-    await calendar.events.delete({ calendarId: 'primary', eventId });
+    const calendarId = resolveCalendarId({});
+    await calendar.events.delete({ calendarId: calendarId || 'primary', eventId });
     await pool.query(`DELETE FROM appointments WHERE calendar_event_id = $1`, [eventId]);
     console.log(`🗑️ Evento ${eventId} removido do Google Calendar e do banco.`);
     return true;

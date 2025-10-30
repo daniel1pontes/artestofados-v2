@@ -1,7 +1,7 @@
 const { google } = require('googleapis');
 const pool = require('../config/database');
 const { createAppointment, findConflicts } = require('../models/agendamento');
-const { getAuthClient } = require('../config/google-calendar');
+const { getAuthClient, resolveCalendarId } = require('../config/google-calendar');
 
 function normalizeAgendaType(type) {
   const t = String(type || '').toLowerCase();
@@ -64,11 +64,12 @@ async function update(req, res) {
 
     // Atualizar Google Calendar se houver id
     if (appt.calendar_event_id) {
-      const auth = getAuthClient();
+      const auth = await getAuthClient();
       const calendar = google.calendar({ version: 'v3', auth });
+      const calendarId = resolveCalendarId({ agendaType: normalizeAgendaType(appt.agenda_type) });
 
       await calendar.events.patch({
-        calendarId: 'primary',
+        calendarId: calendarId || 'primary',
         eventId: appt.calendar_event_id,
         resource: {
           summary: summary || appt.summary,
@@ -107,9 +108,10 @@ async function remove(req, res) {
     if (appt.calendar_event_id) {
       try {
         const { getAuthClient } = require('../config/google-calendar');
-        const auth = getAuthClient();
+        const auth = await getAuthClient();
         const calendar = google.calendar({ version: 'v3', auth });
-        await calendar.events.delete({ calendarId: 'primary', eventId: appt.calendar_event_id });
+        const calendarId = resolveCalendarId({ agendaType: normalizeAgendaType(appt.agenda_type) });
+        await calendar.events.delete({ calendarId: calendarId || 'primary', eventId: appt.calendar_event_id });
       } catch (err) {
         console.error('⚠️ Could not delete calendar event:', err.message);
       }

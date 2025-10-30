@@ -13,6 +13,7 @@ const {
   checkTimeSlotAvailability, // Esta não está sendo usada diretamente nos handlers, mas `isWithinWorkingHours` e `suggestAlternativeTimes` sim
   suggestAlternativeTimes,
   isWithinWorkingHours,
+  resolveCalendarId,
 } = require('../config/google-calendar');
 
 const {
@@ -189,7 +190,6 @@ const calendarTools = [
   },
 ];
 
-
 // ========== HANDLERS DAS FERRAMENTAS ==========
 
 function parseBrazilDateTime(dateStr, timeStr) {
@@ -240,9 +240,19 @@ function parseBrazilDateTime(dateStr, timeStr) {
     }
   }
 
-  const [hour, minute] = timeStr.split(':').map(Number);
+  // Normalizar horário: aceitar "12h", "12", "12:00", "12h30"
+  let hour, minute;
+  if (typeof timeStr === 'string') {
+    const trimmed = timeStr.trim().toLowerCase();
+    // Tentar capturar HH e MM opcionais (12h30, 12:30, 12h, 12)
+    const m = trimmed.match(/^(\d{1,2})(?:[:hH\s]?(\d{1,2}))?$/);
+    if (m) {
+      hour = parseInt(m[1], 10);
+      minute = m[2] !== undefined ? parseInt(m[2], 10) : 0;
+    }
+  }
   if (isNaN(hour) || isNaN(minute)) {
-      throw new Error("Formato de horário inválido. Use HH:MM.");
+    throw new Error("Formato de horário inválido. Use HH:MM (ex: 14:00) ou '12h'/'12'.");
   }
 
   console.log(`🕐 Parseando: ${day}/${month}/${year} ${hour}:${minute} (Horário de Brasília)`);
@@ -390,7 +400,7 @@ async function handleCriarAgendamento(args, phoneNumber) {
         description,
         start,
         end,
-        { agendaType: tipo, clientName: cliente_nome }
+        { agendaType: tipo, clientName: cliente_nome, calendarId: resolveCalendarId({ agendaType: tipo }) }
       );
       
       calendarEventId = calendarEvent.id;
@@ -553,7 +563,7 @@ async function handleEditarAgendamento(args, phoneNumber) {
             description,
             start,
             end,
-            { agendaType: tipo, clientName: cliente_nome }
+            { agendaType: tipo, clientName: cliente_nome, calendarId: resolveCalendarId({ agendaType: tipo }) }
         );
         htmlLink = updatedEvent.htmlLink;
         console.log('✅ Evento atualizado no Google Calendar');
@@ -592,7 +602,6 @@ async function handleEditarAgendamento(args, phoneNumber) {
   }
 }
 
-
 // HANDLER MODIFICADO
 async function handleCancelarAgendamento(args, phoneNumber) {
   // O argumento 'confirmar' é apenas para a IA garantir que o usuário confirmou.
@@ -617,7 +626,9 @@ async function handleCancelarAgendamento(args, phoneNumber) {
     if (latest.calendar_event_id) {
       console.log(`🗑️ Deletando evento do Google Calendar: ${latest.calendar_event_id}`);
       try {
-        await deleteCalendarEvent(latest.calendar_event_id);
+        const tipo = latest.agenda_type;
+        const calendarId = resolveCalendarId({ agendaType: tipo });
+        await deleteCalendarEvent(latest.calendar_event_id, { agendaType: tipo, calendarId });
         console.log('✅ Evento deletado do Google Calendar');
       } catch (calendarError) {
         console.error('⚠️ Erro ao DELETAR do Google Calendar:', calendarError.message);
@@ -719,10 +730,10 @@ async function generateChatbotResponse(message, stateObj, contact, phoneNumber) 
   const anoAtual = new Date().getFullYear();
 
   const systemPrompt = `
-Você é *Maria*, assistente virtual da Artestofados, empresa especializada em fabricação, reforma e personalização de estofados em *João Pessoa - PB*. 🛋️
+Você é *Maria*, assistente virtual da **Artestofados**, empresa especializada em fabricação, reforma e personalização de estofados em *João Pessoa - PB*. 🛋️
 
-Data de hoje: ${dataAtual}
-Ano atual: ${anoAtual}
+Data de hoje: \${dataAtual}
+Ano atual: \${anoAtual}
 
 🎯 PAPEL
 Atender clientes com simpatia, responder *apenas* perguntas relacionadas à Artestofados, e executar as ferramentas de agendamento (criar, editar, cancelar) de forma precisa.
@@ -738,51 +749,100 @@ Você só deve responder mensagens que tenham relação com:
 Responda educadamente: "Desculpe, posso te ajudar apenas com informações e serviços da Artestofados, tudo bem? 💙"
 
 ---
-📅 REGRAS DE AGENDAMENTO (OBRIGATÓRIO SEGUIR OS FLUXOS)
+
+🏁 FLUXO DE ATENDIMENTO PADRÃO
+(antes de iniciar qualquer agendamento, siga essa sequência)
 ---
 
-VOCÊ TEM FERRAMENTAS DISPONÍVEIS — USE-AS SEMPRE!
-NÃO avise que vai usar a ferramenta, APENAS USE.
-NÃO invente horários ou disponibilidade.
+1️⃣ **Boas-vindas**
+Cumprimente o cliente e pergunte o nome:
+> "Olá! 😊 Seja bem-vindo(a) à Artestofados, especialista em fabricação e reforma de estofados em João Pessoa. Posso saber seu nome, por favor?"
 
-➡️ FLUXO 1: CRIAR NOVO AGENDAMENTO
-1. Cliente pede para agendar ou menciona data/hora.
-2. Chame IMEDIATAMENTE \`verificar_disponibilidade\` com a data, hora e tipo (se não souber o tipo, pergunte primeiro).
-3. [AGUARDE O RESULTADO]
-4. Se disponível: Pergunte o nome completo do cliente (se já não souber).
-5. Com NOME, DATA, HORA e TIPO, chame \`criar_agendamento\`.
-6. [AGUARDE O RESULTADO]
-7. Se ocupado: Chame \`sugerir_horarios\` para a data mencionada.
-8. Repasse a mensagem de sucesso ou erro da ferramenta *exatamente* como ela veio.
+2️⃣ **Identificar necessidade**
+Depois do nome:
+> "Perfeito, [nome]! Você gostaria de *fabricar um novo estofado* ou *reformar um estofado existente*?"
 
-➡️ FLUXO 2: EDITAR/REMARCAR AGENDAMENTO (NOVO)
-1. Cliente pede para "editar", "remarcar" ou "alterar" o horário.
-2. Chame IMEDIATAMENTE \`buscar_ultimo_agendamento\`.
-3. [AGUARDE O RESULTADO]
-4. Mostre o agendamento encontrado e PERGUNTE A NOVA DATA E HORÁRIO. (Ex: "Claro! Encontrei seu agendamento [dados]. Para qual nova data e horário (DD/MM/AAAA HH:MM) você gostaria de alterar?")
-5. Cliente informa a nova data/hora.
-6. Chame \`verificar_disponibilidade\` para a *nova* data/hora.
-7. [AGUARDE O RESULTADO]
-8. Se disponível: Chame \`editar_agendamento\`. (Ex: \`editar_agendamento({ "eventId": "[ID_DO_EVENTO_BUSCADO]", "nova_data": "...", "novo_horario": "..." })\`)
-9. Se ocupado: Chame \`sugerir_horarios\`.
+3️⃣ **Se o cliente quiser REFORMA**
+> "Ótimo, [nome]! Por gentileza, envie algumas fotos do estofado que deseja reformar para que nossa equipe possa analisar. Assim que possível, retornaremos com o orçamento e orientações, tudo bem?"
+➡️ Após isso, agradeça e encerre:
+> "Agradeço seu contato com a Artestofados! 💙 Assim que nossa equipe avaliar as fotos, retornaremos com os detalhes."
 
-➡️ FLUXO 3: CANCELAR AGENDAMENTO (ATUALIZADO)
-1. Cliente pede para "cancelar".
-2. Chame IMEDIATAMENTE \`buscar_ultimo_agendamento\`.
-3. [AGUARDE O RESULTADO]
-4. Mostre o agendamento encontrado e PEÇA CONFIRMAÇÃO. (Ex: "Encontrei seu agendamento [dados]. Você confirma o cancelamento? (Sim/Não)")
-5. Cliente responde "Sim".
-6. Chame \`cancelar_agendamento({ "confirmar": true })\`.
-7. [AGUARDE O RESULTADO]
-8. Repasse a mensagem de sucesso ou erro da ferramenta.
+4️⃣ **Se o cliente quiser FABRICAÇÃO**
+> "Perfeito, [nome]! Qual tipo de estofado você gostaria de fabricar? Temos opções como *sofá, poltrona, cadeira ou cama*."
 
-⚠️ FORMATO DE DATAS E HORÁRIOS
-- Aceite datas relativas como "hoje" e "amanhã" e passe-as *diretamente* para as ferramentas (elas sabem tratar).
-- Se o cliente passar uma data como "dia 30" ou "sexta-feira", peça o formato completo: "Por favor, me informe a data completa (DD/MM/AAAA) e o horário (HH:MM)."
+5️⃣ **Perguntar sobre projeto**
+Após o cliente informar o tipo:
+> "Você já possui um projeto ou referência do estofado que deseja? 📐"
 
-🏢 INFORMAÇÕES
-Endereço: Av. Almirante Barroso, 389, Centro – João Pessoa – PB
-Horário: Segunda a sexta, 8:00 às 18:00
+- Se **tiver projeto**:
+  > "Excelente! Podemos agendar uma *reunião online* ou *visita à nossa loja* para discutir os detalhes. Qual opção você prefere?"
+
+- Se **não tiver projeto**:
+  > "Sem problema! Podemos conversar melhor para entender seu estilo e criar algo sob medida. 😊 Prefere uma *visita à loja* ou *reunião online*?"
+
+6️⃣ **Agendamento**
+Após o cliente escolher o tipo de atendimento, pergunte:
+> "Qual seria o melhor dia e horário para você (DD/MM/AAAA e HH:MM)?"
+
+📅 Utilize as ferramentas de agendamento (descritas abaixo):
+- \`verificar_disponibilidade\`
+- \`criar_agendamento\`
+- \`sugerir_horarios\`
+- \`buscar_ultimo_agendamento\`
+- \`editar_agendamento\`
+- \`cancelar_agendamento\`
+
+7️⃣ **Confirmação**
+Depois da criação bem-sucedida:
+> "Perfeito, [nome]! Seu agendamento foi confirmado para [data e hora]. Estaremos prontos para conversar sobre seu projeto. 💙"
+
+8️⃣ **Encerramento**
+Finalize com simpatia:
+> "Obrigada por escolher a Artestofados! Ficamos muito felizes em atender você. Até breve! 🛋️✨"
+
+---
+
+📅 REGRAS DE AGENDAMENTO (MANTIDAS)
+---
+
+➡️ **FLUXO 1: CRIAR NOVO AGENDAMENTO**
+1. Cliente pede para agendar ou menciona data/hora.  
+2. Chame \`verificar_disponibilidade\` com a data, hora e tipo.  
+3. [AGUARDE O RESULTADO]  
+4. Se disponível: pergunte o nome completo do cliente (se ainda não souber).  
+5. Com NOME, DATA, HORA e TIPO, chame \`criar_agendamento\`.  
+6. [AGUARDE O RESULTADO]  
+7. Se ocupado: chame \`sugerir_horarios\` para a data mencionada.  
+8. Repasse a mensagem de sucesso ou erro da ferramenta *exatamente como veio*.
+
+➡️ **FLUXO 2: EDITAR/REMARCAR AGENDAMENTO**
+1. Cliente pede para "editar", "remarcar" ou "alterar".  
+2. Chame \`buscar_ultimo_agendamento\`.  
+3. [AGUARDE O RESULTADO]  
+4. Mostre o agendamento e pergunte nova data/hora.  
+5. Verifique disponibilidade (\`verificar_disponibilidade\`).  
+6. Se disponível: chame \`editar_agendamento\`.  
+7. Se ocupado: chame \`sugerir_horarios\`.  
+
+➡️ **FLUXO 3: CANCELAR AGENDAMENTO**
+1. Cliente pede para "cancelar".  
+2. Chame \`buscar_ultimo_agendamento\`.  
+3. Mostre o agendamento encontrado e peça confirmação.  
+4. Se confirmar, chame \`cancelar_agendamento({ confirmar: true })\`.  
+5. Repasse a mensagem de sucesso ou erro.
+
+---
+
+⚠️ **FORMATO DE DATAS E HORÁRIOS**
+- Aceite “hoje” e “amanhã” (as ferramentas entendem).  
+- Se o cliente disser “sexta-feira” ou “dia 30”, peça:  
+  > “Por favor, me informe a data completa (DD/MM/AAAA) e o horário (HH:MM).”
+
+---
+
+🏢 **INFORMAÇÕES**
+Endereço: Av. Almirante Barroso, 389, Centro – João Pessoa – PB  
+Horário: Segunda a sexta, 08:00 às 18:00
 `;
 ;
 
@@ -817,6 +877,29 @@ Horário: Segunda a sexta, 8:00 às 18:00
     console.log('  - Conteúdo:', responseMessage.content?.substring(0, 100));
     
     conversation.push(responseMessage);
+
+    // Se a IA respondeu sem usar ferramentas, e a mensagem do usuário sugere intenção de agendar/sugerir/editar/cancelar,
+    // forçar uma segunda chamada com instrução mais rígida para usar as tools.
+    const schedulingIntent = /agend|remarc|edit|cancel|hor[áa]rio|dispon[ií]vel|sugerir|sugest[ãa]o|amanh[ãa]|hoje|dia \d{1,2}/i;
+    if (!responseMessage.tool_calls && schedulingIntent.test(message)) {
+      const strictReminder = {
+        role: 'system',
+        content: 'ATENÇÃO: Para qualquer verificação de disponibilidade, sugestão de horários, criação, edição ou cancelamento de agendamentos, VOCÊ DEVE usar exclusivamente as ferramentas fornecer. NUNCA invente horários ou declare disponibilidade manualmente. Somente responda após usar as tools correspondentes.'
+      };
+      conversation.push(strictReminder);
+      console.log('⚖️ Reforçando uso de ferramentas e refazendo chamada...');
+
+      completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: conversation,
+        tools: calendarTools,
+        tool_choice: 'auto',
+        temperature: 0.2,
+        max_tokens: 800,
+      });
+      responseMessage = completion.choices[0].message;
+      conversation.push(responseMessage);
+    }
 
     // Loop para processar múltiplos tool_calls se necessário (embora 'auto' geralmente chame um de cada vez)
     while (responseMessage.tool_calls) {

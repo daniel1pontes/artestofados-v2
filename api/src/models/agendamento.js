@@ -54,10 +54,26 @@ async function findLatestByPhone(phoneNumber) {
   return result.rows[0] || null;
 }
 
+async function updateAppointment(id, { summary, description, startTime, endTime }) {
+  const result = await pool.query(
+    `UPDATE appointments
+        SET summary = COALESCE($2, summary),
+            description = COALESCE($3, description),
+            start_time = COALESCE($4, start_time),
+            end_time   = COALESCE($5, end_time),
+            updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, calendar_event_id, summary, description, start_time, end_time, agenda_type, client_name, phone_number`,
+    [id, summary || null, description || null, startTime || null, endTime || null]
+  );
+  return result.rows[0];
+}
+
 module.exports = {
   createAppointment,
   findConflicts,
   findLatestByPhone,
+  updateAppointment,
 };
 
 
