@@ -88,32 +88,50 @@ async function checkTimeSlotAvailability(startTime, endTime, options = {}) {
 
     const requestedType = String(options.agendaType || '').toLowerCase();
 
-    // Verificar se há conflitos apenas com o MESMO tipo de agenda
-    const hasConflict = events.some(event => {
-      const eventStart = new Date(event.start.dateTime || event.start.date);
-      const eventEnd = new Date(event.end.dateTime || event.end.date);
-      const eventType = event.extendedProperties?.private?.agendaType?.toLowerCase() || '';
-      const overlaps = (startTime < eventEnd && endTime > eventStart);
-      if (!overlaps) return false;
-      if (!requestedType) return true; // sem tipo informado, considerar conflito
-      // Se o evento existente não tem tipo salvo, considerar conflito para qualquer tipo solicitado
-      if (!eventType) return true;
-      return eventType === requestedType; // conflito só se mesmo tipo
-    });
+    const ALLOWED_OVERLAP = ['online', 'visita', 'presencial'];
 
-    return {
-      available: !hasConflict,
-      conflicts: events.filter(event => {
-        const eventStart = new Date(event.start.dateTime || event.start.date);
-        const eventEnd = new Date(event.end.dateTime || event.end.date);
-        const eventType = event.extendedProperties?.private?.agendaType?.toLowerCase() || '';
-        const overlaps = (startTime < eventEnd && endTime > eventStart);
-        if (!overlaps) return false;
-        if (!requestedType) return true;
-        if (!eventType) return true;
-        return eventType === requestedType;
-      })
-    };
+const hasConflict = events.some(event => {
+  const eventStart = new Date(event.start.dateTime || event.start.date);
+  const eventEnd = new Date(event.end.dateTime || event.end.date);
+  const overlaps = startTime < eventEnd && endTime > eventStart;
+  if (!overlaps) return false;
+
+  const eventType = (event.extendedProperties?.private?.agendaType || '').toLowerCase();
+  const requestedType = String(options.agendaType || '').toLowerCase();
+
+  // Se algum tipo não definido, assumir que pode coexistir
+  if (!eventType || !requestedType) return false;
+
+  // Se ambos forem tipos que podem coexistir e forem diferentes, NÃO há conflito
+  if (ALLOWED_OVERLAP.includes(eventType) && ALLOWED_OVERLAP.includes(requestedType) && eventType !== requestedType) {
+    return false;
+  }
+
+  // Conflito se for mesmo tipo
+  return eventType === requestedType;
+});
+
+return {
+  available: !hasConflict,
+  conflicts: events.filter(event => {
+    const eventStart = new Date(event.start.dateTime || event.start.date);
+    const eventEnd = new Date(event.end.dateTime || event.end.date);
+    const overlaps = startTime < eventEnd && endTime > eventStart;
+    const eventType = (event.extendedProperties?.private?.agendaType || '').toLowerCase();
+    const requestedType = String(options.agendaType || '').toLowerCase();
+
+    // Se algum tipo não definido, assumir que pode coexistir
+    if (!eventType || !requestedType) return false;
+
+    if (ALLOWED_OVERLAP.includes(eventType) && ALLOWED_OVERLAP.includes(requestedType) && eventType !== requestedType) {
+      return false;
+    }
+
+    return eventType === requestedType;
+  })
+};
+
+
   } catch (error) {
     console.error('Error checking time slot availability:', error);
     throw error;
