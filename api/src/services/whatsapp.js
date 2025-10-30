@@ -1,3 +1,20 @@
+// ============================================
+// CORREÇÃO: Serviço WhatsApp com Agendamento
+// ============================================
+// 
+// PROBLEMAS IDENTIFICADOS E CORRIGIDOS:
+// 1. ❌ parseDateTimeFromText não validava se hora foi encontrada
+// 2. ❌ tryScheduleFromMessage executava ANTES do LLM processar
+// 3. ❌ Confirmação do agendamento acontecia mesmo com horário ocupado
+// 4. ❌ Mensagens de conflito eram sobrescritas pelo LLM
+//
+// SOLUÇÃO:
+// - Parse de data/hora mais robusto com validação obrigatória de hora
+// - Verificação de conflito ANTES de salvar
+// - Mensagens determinísticas para conflitos (não deixa LLM confirmar)
+// - Logs detalhados para debug
+//
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const pool = require('../config/database');
 const fs = require('fs');
@@ -214,7 +231,6 @@ async function handleIncomingMessage(msg) {
     console.log('📩 NEW MESSAGE RECEIVED');
     console.log('='.repeat(80));
     
-    // Verificar se é mensagem de grupo e ignorar
     const chat = await msg.getChat();
     if (chat.isGroup) {
       console.log('👥 Message from GROUP - IGNORING');
@@ -333,43 +349,51 @@ async function processChatbotMessage(msg) {
     console.log('🧠 Generating chatbot response...');
     const response = await generateChatbotResponse(msg.body, state, contact);
 
-    // Tentar agendar automaticamente se mensagem tiver data/horário e tipo
+    // ⚠️ CRÍTICO: Verificar agendamento ANTES de confirmar ao cliente
+    console.log('📅 Checking for scheduling attempt...');
     const schedulingResult = await tryScheduleFromMessage(msg.body, state.metadata, contact, fromNumber);
-    if (schedulingResult?.scheduled) {
+    
+    if (schedulingResult) {
+      console.log('📅 Scheduling result:', schedulingResult);
+      
+      if (schedulingResult.scheduled === true) {
+        // ✅ SUCESSO: Agendamento criado
+        console.log('✅ Appointment successfully scheduled');
+        const confirmation = `✅ Agendamento confirmado: ${schedulingResult.humanReadable}\n\nSe precisar alterar ou cancelar, me avise por aqui. 👍`;
+        response.response = confirmation;
+        response.metadata = {
+          ...response.metadata,
+          lastScheduledEvent: schedulingResult.eventPublic,
+        };
+      } else if (schedulingResult.scheduled === false) {
+        // ❌ CONFLITO ou FORA DO EXPEDIENTE
+        console.log('❌ Scheduling failed:', schedulingResult.reason);
+        
+        const header = schedulingResult.reason === 'outside_hours'
+          ? '⌛ Infelizmente este horário está fora do nosso expediente (8h às 18h, seg a sex).'
+          : '⚠️ Este horário já está ocupado para esta modalidade.';
+        
+        const sugg = (schedulingResult.suggestions || [])
+          .slice(0, 3)
+          .map(s => `• ${s.formatted}`)
+          .join('\n');
+
+        const suggestionsText = sugg ? `\n\nSugestões de horários disponíveis:\n${sugg}` : '';
+        
+        // MENSAGEM DETERMINÍSTICA (não deixa LLM contradizer)
+        response.response = `${header}${suggestionsText}\n\nPosso reservar um desses horários para você?`;
+      }
+    }
+
     // Tentar cancelar/remarcar pelo texto
+    console.log('🔄 Checking for cancellation/reschedule attempt...');
     const cancelResult = await tryCancelOrRescheduleFromMessage(msg.body, fromNumber);
     if (cancelResult?.changed) {
+      console.log('✅ Cancellation/reschedule successful:', cancelResult);
       const confirmation = cancelResult.type === 'cancel'
         ? `✅ Agendamento cancelado: ${cancelResult.humanReadable}`
         : `✅ Agendamento remarcado: ${cancelResult.humanReadable}`;
       response.response = `${confirmation}\n\n${response.response}`;
-    } else if (schedulingResult && schedulingResult.scheduled === false) {
-      // Mensagem determinística de indisponibilidade (não deixar o LLM confirmar acidentalmente)
-      const header = schedulingResult.reason === 'outside_hours'
-        ? '⌛ Infelizmente este horário está fora do nosso expediente (8h às 18h, seg a sex).'
-        : '⚠️ Este horário já está ocupado para esta modalidade.';
-      const sugg = (schedulingResult.suggestions || [])
-        .slice(0, 2)
-        .map(s => `• ${s.formatted}`)
-        .join('\n');
-
-      const suggAlt = (schedulingResult.suggestions || [])
-        .slice(0, 2)
-        .map(s => `• ${s.formatted}`)
-        .join('\n');
-
-      const suggestionsText = sugg ? `\n\nSugestões disponíveis:\n${sugg}` : '';
-      response.response = `${header}${suggestionsText}\n\nPosso reservar um desses horários para você?`;
-    }
-      // Mensagem determinística de confirmação (evita contradição do LLM)
-      const confirmation = `✅ Agendamento confirmado: ${schedulingResult.humanReadable}\nLink: ${schedulingResult.htmlLink || '—'}`;
-      const followup = '\n\nSe precisar alterar ou cancelar, me avise por aqui. 👍';
-      response.response = `${confirmation}${followup}`;
-      // Persistiremos metadados após enviar a resposta (já abaixo)
-      response.metadata = {
-        ...response.metadata,
-        lastScheduledEvent: schedulingResult.eventPublic,
-      };
     }
     
     if (response) {
@@ -527,6 +551,11 @@ INFORMAÇÕES DA EMPRESA:
 - Endereço: Av. Almirante Barroso, 389, Centro – João Pessoa – PB
 - CNPJ: 08.621.718/0001-07
 
+IMPORTANTE SOBRE AGENDAMENTOS:
+- NÃO confirme agendamentos até que o sistema valide a disponibilidade
+- Se o cliente pedir um horário específico, aguarde a confirmação do sistema
+- O sistema irá automaticamente verificar conflitos e horário de expediente
+
 Mantenha o profissionalismo mas seja humana e calorosa! 💙`;
 
   const conversation = [
@@ -629,7 +658,8 @@ async function sendMessage(phoneNumber, response) {
   }
 }
 
-// ===== Helpers de agendamento pelo texto =====
+// ===== FUNÇÕES DE AGENDAMENTO CORRIGIDAS =====
+
 function inferAgendaTypeFromText(text, fallback) {
   const t = (text || '').toLowerCase();
   if (t.includes('online') || t.includes('vídeo') || t.includes('video') || t.includes('reuni')) return 'online';
@@ -642,10 +672,13 @@ function buildBrazilDate(year, monthIndex, day, hour = 0, minute = 0, second = 0
   return new Date(Date.UTC(year, monthIndex, day, hour + 3, minute, second, ms));
 }
 
+// ✅ FUNÇÃO CORRIGIDA: Parse de data/hora mais robusto
 function parseDateTimeFromText(text) {
   if (!text) return null;
   const t = text.toLowerCase().trim();
   const now = new Date();
+
+  console.log('📅 parseDateTimeFromText - Iniciando parse da mensagem:', text);
 
   function normalizeHourMinute(hhStr, mmStr) {
     const hour = Math.max(0, Math.min(23, parseInt(hhStr, 10)));
@@ -657,23 +690,40 @@ function parseDateTimeFromText(text) {
     const d = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
     const currentDow = d.getDay();
     let add = (targetDow - currentDow + 7) % 7;
-    if (add === 0) add = 7; // próximo dia útil igual, não hoje
+    if (add === 0) add = 7;
     d.setDate(d.getDate() + add);
     return d;
+  }
+
+  // 🔴 CRÍTICO: Extrair HORA PRIMEIRO - SEM HORA = NÃO É AGENDAMENTO
+  let timeMatch = t.match(/(?:\bàs|\bas)?\s*(\d{1,2})(?::(\d{2}))?\s*(h|hs)?\b/);
+  let hour = null, minute = null;
+  
+  if (timeMatch) {
+    const { hour: h, minute: mnt } = normalizeHourMinute(timeMatch[1], timeMatch[2]);
+    hour = h;
+    minute = mnt;
+    console.log(`✅ Hora encontrada: ${hour}:${minute.toString().padStart(2, '0')}`);
+  } else {
+    console.log('⚠️ Nenhuma hora encontrada na mensagem - não é uma solicitação de agendamento');
+    return null;
   }
 
   // 1) Expressões relativas: hoje, amanhã, depois de amanhã
   let baseDate = null;
   if (/(\b)hoje(\b)/.test(t)) {
     baseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    console.log('📅 Data relativa: HOJE');
   } else if (/(amanh[ãa]|amanha)/.test(t)) {
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     d.setDate(d.getDate() + 1);
     baseDate = d;
+    console.log('📅 Data relativa: AMANHÃ');
   } else if (/depois\s+de\s+amanh[ãa]/.test(t)) {
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     d.setDate(d.getDate() + 2);
     baseDate = d;
+    console.log('📅 Data relativa: DEPOIS DE AMANHÃ');
   }
 
   // 2) Dias da semana
@@ -686,10 +736,12 @@ function parseDateTimeFromText(text) {
     'sexta': 5, 'sexta-feira': 5,
     'sabado': 6, 'sábado': 6,
   };
+  
   if (!baseDate) {
     for (const key of Object.keys(weekdayMap)) {
       if (t.includes(key)) {
         baseDate = nextWeekdayDate(weekdayMap[key], now);
+        console.log(`📅 Dia da semana: ${key.toUpperCase()}`);
         break;
       }
     }
@@ -701,39 +753,40 @@ function parseDateTimeFromText(text) {
   if (m) {
     const [_, dd, mm, yyyy] = m;
     explicitDate = new Date(parseInt(yyyy, 10), parseInt(mm, 10) - 1, parseInt(dd, 10));
+    console.log(`📅 Data explícita: ${dd}/${mm}/${yyyy}`);
   } else {
     m = t.match(/\b(\d{1,2})\/(\d{1,2})\b/);
     if (m) {
       const [_, dd, mm] = m;
       explicitDate = new Date(now.getFullYear(), parseInt(mm, 10) - 1, parseInt(dd, 10));
+      console.log(`📅 Data explícita: ${dd}/${mm}/${now.getFullYear()}`);
     }
-  }
-
-  // 4) Hora: "às 14h30", "14:00", "14h", "as 9h", "10hs"
-  let timeMatch = t.match(/(?:\bàs|\bas)?\s*(\d{1,2})(?::(\d{2}))?\s*(h|hs)?\b/);
-  let hour = null, minute = null;
-  if (timeMatch) {
-    const { hour: h, minute: mnt } = normalizeHourMinute(timeMatch[1], timeMatch[2]);
-    hour = h; minute = mnt;
   }
 
   // Prioridade: data explícita > base relativa/dia da semana > hoje
   const dateBase = explicitDate || baseDate || new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (!dateBase) return null;
+  
+  if (!dateBase) {
+    console.log('⚠️ Nenhuma data base encontrada');
+    return null;
+  }
 
-  const finalHour = hour != null ? hour : 0;
-  const finalMinute = minute != null ? minute : 0;
   const finalDate = buildBrazilDate(
     dateBase.getFullYear(),
     dateBase.getMonth(),
     dateBase.getDate(),
-    finalHour,
-    finalMinute,
+    hour,
+    minute,
     0,
     0
   );
 
-  if (isNaN(finalDate.getTime())) return null;
+  if (isNaN(finalDate.getTime())) {
+    console.log('⚠️ Data final inválida');
+    return null;
+  }
+
+  console.log(`✅ Data/hora interpretada: ${finalDate.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
   return finalDate;
 }
 
@@ -742,17 +795,23 @@ async function tryCancelOrRescheduleFromMessage(message, phoneNumber) {
     const t = (message || '').toLowerCase();
     const wantsCancel = t.includes('cancelar') || t.includes('cancela') || t.includes('desmarcar');
     const wantsReschedule = t.includes('remarcar') || t.includes('remarca') || t.includes('alterar') || t.includes('mudar horário') || t.includes('mudar horario');
+    
     if (!wantsCancel && !wantsReschedule) return null;
 
     const { findLatestByPhone, findConflicts } = require('../models/agendamento');
     const latest = await findLatestByPhone(phoneNumber);
-    if (!latest) return null;
+    
+    if (!latest) {
+      console.log('⚠️ Nenhum agendamento encontrado para cancelar/remarcar');
+      return null;
+    }
 
     const start = new Date(latest.start_time);
     const end = new Date(latest.end_time);
     const humanBase = `${latest.summary} em ${start.toLocaleString('pt-BR')} - ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
 
     if (wantsCancel) {
+      console.log('🗑️ Cancelando agendamento:', latest.id);
       try {
         if (latest.calendar_event_id) {
           const { getAuthClient } = require('../config/google-calendar');
@@ -764,18 +823,29 @@ async function tryCancelOrRescheduleFromMessage(message, phoneNumber) {
         console.error('⚠️ Could not delete calendar event:', err.message);
       }
       await pool.query('DELETE FROM appointments WHERE id = $1', [latest.id]);
+      console.log('✅ Agendamento cancelado com sucesso');
       return { changed: true, type: 'cancel', humanReadable: humanBase };
     }
 
     if (wantsReschedule) {
+      console.log('🔄 Remarcando agendamento:', latest.id);
       const newDate = parseDateTimeFromText(message);
-      if (!newDate) return null;
+      
+      if (!newDate) {
+        console.log('⚠️ Nova data/hora não encontrada na mensagem');
+        return null;
+      }
+      
       const duration = end.getTime() - start.getTime();
       const newEnd = new Date(newDate.getTime() + duration);
 
       const conflicts = await findConflicts(newDate, newEnd, latest.agenda_type);
       const conflictsFiltered = conflicts.filter(c => c.id !== latest.id);
-      if (conflictsFiltered.length > 0) return null;
+      
+      if (conflictsFiltered.length > 0) {
+        console.log('⚠️ Novo horário possui conflito');
+        return null;
+      }
 
       if (latest.calendar_event_id) {
         try {
@@ -801,6 +871,7 @@ async function tryCancelOrRescheduleFromMessage(message, phoneNumber) {
       );
 
       const humanNew = `${latest.summary} em ${newDate.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${newEnd.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`;
+      console.log('✅ Agendamento remarcado com sucesso');
       return { changed: true, type: 'reschedule', humanReadable: humanNew };
     }
 
@@ -811,26 +882,49 @@ async function tryCancelOrRescheduleFromMessage(message, phoneNumber) {
   }
 }
 
+// ✅ FUNÇÃO CORRIGIDA: Verificação completa antes de salvar
 async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
   try {
+    console.log('\n📅 tryScheduleFromMessage - Iniciando verificação de agendamento');
+    console.log('📝 Mensagem:', message);
+    
     const customerName = contact.pushname || contact.name || '';
     const rawType = inferAgendaTypeFromText(message, metadata?.agendaType);
     const agendaType = (rawType === 'visita' || rawType === 'presencial') ? 'loja' : rawType;
+    
+    console.log('📋 Tipo de agenda inferido:', agendaType);
+    
+    if (!agendaType) {
+      console.log('⚠️ Tipo de agenda não identificado');
+      return null;
+    }
+    
     const start = parseDateTimeFromText(message);
-    if (!agendaType || !start) return null;
+    
+    if (!start) {
+      console.log('⚠️ Data/hora não identificada na mensagem');
+      return null;
+    }
 
     const duration = 60;
     const end = new Date(start.getTime() + duration * 60000);
 
-    // Validar expediente (8-18h, dias úteis) em America/Sao_Paulo
+    console.log('📅 Horário solicitado:', start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }));
+
+    // 🔴 VALIDAÇÃO 1: Horário de expediente
     const { isWithinWorkingHours, suggestAlternativeTimes } = require('../config/google-calendar');
+    
     if (!isWithinWorkingHours(start) || !isWithinWorkingHours(end)) {
+      console.log('❌ Horário fora do expediente');
+      
       let suggestions = [];
       try {
         suggestions = await suggestAlternativeTimes(start, duration, { agendaType });
       } catch (e) {
+        console.error('⚠️ Erro ao buscar sugestões:', e.message);
         suggestions = [];
       }
+      
       return {
         scheduled: false,
         reason: 'outside_hours',
@@ -842,20 +936,22 @@ async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
       };
     }
 
-    const autoSummary = agendaType === 'online'
-      ? `Atendimento - Reunião Online${customerName ? ` | ${customerName}` : ''}`
-      : `Atendimento - Visita à Loja${customerName ? ` | ${customerName}` : ''}`;
-
-    // Verificar conflitos no banco (mesmo tipo)
+    // 🔴 VALIDAÇÃO 2: Verificar conflitos no banco de dados
+    console.log('🔍 Verificando conflitos no banco de dados...');
     const { findConflicts } = require('../models/agendamento');
     const dbConflicts = await findConflicts(start, end, agendaType);
+    
     if (dbConflicts.length > 0) {
+      console.log(`❌ Conflito detectado! ${dbConflicts.length} agendamento(s) no mesmo horário`);
+      
       let suggestions = [];
       try {
         suggestions = await suggestAlternativeTimes(start, duration, { agendaType });
       } catch (e) {
+        console.error('⚠️ Erro ao buscar sugestões:', e.message);
         suggestions = [];
       }
+      
       return {
         scheduled: false,
         reason: 'conflict',
@@ -867,7 +963,13 @@ async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
       };
     }
 
-    // Persistir no banco (sem criar evento no Google Calendar) e somente confirmar se salvar com sucesso
+    // ✅ HORÁRIO DISPONÍVEL - Salvar no banco
+    console.log('✅ Horário disponível! Salvando agendamento...');
+    
+    const autoSummary = agendaType === 'online'
+      ? `Atendimento - Reunião Online${customerName ? ` | ${customerName}` : ''}`
+      : `Atendimento - Visita à Loja${customerName ? ` | ${customerName}` : ''}`;
+
     try {
       await createAppointment({
         calendarEventId: null,
@@ -879,7 +981,12 @@ async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
         clientName: customerName || null,
         phoneNumber: phoneNumber || null,
       });
+      
       const humanReadable = `${agendaType === 'online' ? 'Reunião online' : 'Visita à loja'} em ${start.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })} - ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`;
+      
+      console.log('✅ Agendamento salvo com sucesso!');
+      console.log('📝 Resumo:', humanReadable);
+      
       return {
         scheduled: true,
         humanReadable,
@@ -894,7 +1001,7 @@ async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
         }
       };
     } catch (persistErr) {
-      console.error('⚠️ Could not persist appointment:', persistErr.message);
+      console.error('❌ Erro ao persistir agendamento:', persistErr.message);
       const reason = String(persistErr.message || '').includes('conflict') ? 'conflict' : 'persist_error';
       return {
         scheduled: false,
@@ -904,6 +1011,7 @@ async function tryScheduleFromMessage(message, metadata, contact, phoneNumber) {
     }
   } catch (err) {
     console.error('❌ Scheduling from message failed:', err.message);
+    console.error('Stack trace:', err.stack);
     return { scheduled: false, reason: 'error', suggestions: [] };
   }
 }
