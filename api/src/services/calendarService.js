@@ -4,59 +4,9 @@ const {
   createCalendarEvent,
   getAuthClient,
 } = require('../config/google-calendar');
-const { google } = require('googleapis');
-const pool = require('../config/database');
-
-async function checkTimeSlotAvailability(startTime, endTime, options = {}) {
-  try {
-    const auth = await getAuthClient();
-    if (!auth) throw new Error('Google Calendar not configured');
-
-    const calendar = google.calendar({ version: 'v3', auth });
-    const calendarId = options.calendarId || getCalendarIdByType(options.agendaType);
-
-    const response = await calendar.events.list({
-    calendarId: calendarId || 'primary',
-    timeMin: startTime.toISOString(),
-    timeMax: endTime.toISOString(),
-    singleEvents: true,
-    orderBy: 'startTime',
-    fields: 'items(id,summary,start,end,extendedProperties)',
-  });
 
 
-    const events = response.data.items || [];
-    const requestedType = String(options.agendaType || '').toLowerCase();
 
-    const ALLOWED_OVERLAP = ['online', 'visita', 'presencial'];
-
-    // Função para decidir se dois tipos conflitam
-    const isConflict = (eventType) => {
-      if (!eventType || !requestedType) return false; // sem tipo, não conflita
-      if (ALLOWED_OVERLAP.includes(eventType) && ALLOWED_OVERLAP.includes(requestedType) && eventType !== requestedType) {
-        return false; // tipos diferentes permitidos
-      }
-      return eventType === requestedType; // conflito só se mesmo tipo
-    };
-
-    const conflicts = events.filter(event => {
-      const eventStart = new Date(event.start.dateTime || event.start.date);
-      const eventEnd = new Date(event.end.dateTime || event.end.date);
-      const overlaps = startTime < eventEnd && endTime > eventStart;
-      const eventType = (event.extendedProperties?.private?.agendaType || '').toLowerCase();
-
-      return overlaps && isConflict(eventType);
-    });
-
-    return {
-      available: conflicts.length === 0,
-      conflicts
-    };
-  } catch (error) {
-    console.error('Error checking time slot availability:', error);
-    throw error;
-  }
-}
 
 
 async function createGoogleEvent(agendamento) {
@@ -171,7 +121,7 @@ async function listUpcomingEvents(options = {}) {
 }
 
 module.exports = {
-  checkAvailability,
+  checkAvailability: checkTimeSlotAvailability,
   createGoogleEvent,
   deleteGoogleEvent,
   listUpcomingEvents,
