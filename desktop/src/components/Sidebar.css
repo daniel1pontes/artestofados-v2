@@ -85,3 +85,29 @@
   font-weight: 500;
 }
 
+.sidebar-footer {
+  margin-top: auto;
+  padding: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.logout-btn {
+  width: 100%;
+  height: 42px;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: linear-gradient(180deg, #ef4444, #dc2626);
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.06s ease;
+}
+
+.logout-btn:hover {
+  box-shadow: 0 8px 18px rgba(239, 68, 68, 0.25);
+}
+
+.logout-btn:active {
+  transform: translateY(1px);
+}
+

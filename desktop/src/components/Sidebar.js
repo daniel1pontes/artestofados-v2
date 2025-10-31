@@ -1,7 +1,7 @@
 import React from 'react';
 import './Sidebar.css';
 
-function Sidebar({ activeTab, setActiveTab }) {
+function Sidebar({ activeTab, setActiveTab, onLogout }) {
   const tabs = [
     { id: 'chatbot', label: 'Chatbot' },
     { id: 'gerar', label: 'Gerar OS' },
@@ -38,6 +38,9 @@ function Sidebar({ activeTab, setActiveTab }) {
           </button>
         ))}
       </nav>
+      <div className="sidebar-footer">
+        <button className="logout-btn" onClick={onLogout}>Sair</button>
+      </div>
     </aside>
   );
 }
