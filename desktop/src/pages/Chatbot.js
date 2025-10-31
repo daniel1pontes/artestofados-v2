@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { chatbotAPI, appointmentsAPI, agendamentosAPI } from '../services/api';
 import { QRCodeSVG } from 'qrcode.react';
 import './Chatbot.css';
@@ -10,11 +10,45 @@ function Chatbot() {
   const [debugInfo, setDebugInfo] = useState('');
   const [appointments, setAppointments] = useState([]);
   const [loadingAppointments, setLoadingAppointments] = useState(false);
-  const [appointmentsFilter, setAppointmentsFilter] = useState('all');
   const [filterDate, setFilterDate] = useState(''); // YYYY-MM-DD
-  const [filterTipo, setFilterTipo] = useState('all'); // all | visita | reuniao
   const pollIntervalRef = useRef(null);
   const attemptCountRef = useRef(0);
+
+  const loadAppointments = useCallback(async () => {
+    try {
+      setLoadingAppointments(true);
+      let itemsResp = null;
+      try {
+        const params = {};
+        if (filterDate) {
+          const from = new Date(filterDate + 'T00:00:00');
+          const to = new Date(filterDate + 'T23:59:59');
+          params.from = from.toISOString();
+          params.to = to.toISOString();
+        }
+        const resp = await agendamentosAPI.listar(params);
+        itemsResp = resp.items;
+      } catch (e) {
+        const r2 = await appointmentsAPI.listar();
+        itemsResp = r2.items;
+      }
+      let items = itemsResp || [];
+      // Ordenar por proximidade da data atual
+      const now = Date.now();
+      items.sort((a, b) => {
+        const sa = new Date(a.data || a.start_time).getTime();
+        const sb = new Date(b.data || b.start_time).getTime();
+        const da = Math.abs(sa - now);
+        const db = Math.abs(sb - now);
+        return da - db;
+      });
+      setAppointments(items);
+    } catch (error) {
+      console.error('❌ Error loading appointments:', error);
+    } finally {
+      setLoadingAppointments(false);
+    }
+  }, [filterDate]);
 
   useEffect(() => {
     loadStatus();
@@ -26,6 +60,20 @@ function Chatbot() {
       }
     };
   }, []);
+
+  // Auto-refresh appointments when filters change
+  useEffect(() => {
+    loadAppointments();
+  }, [loadAppointments]);
+
+  // Auto-refresh QR code every 15s when not connected
+  useEffect(() => {
+    if (status?.status === 'connected') return;
+    const id = setInterval(() => {
+      loadQRCode();
+    }, 15000);
+    return () => clearInterval(id);
+  }, [status?.status]);
 
   const startQRPolling = () => {
     console.log('🔄 Starting QR polling...');
@@ -129,35 +177,6 @@ function Chatbot() {
     }
   };
 
-  const loadAppointments = async () => {
-    try {
-      setLoadingAppointments(true);
-      // Preferir agendamentos mapeados
-      let itemsResp = null;
-      try {
-        const params = {};
-        if (filterDate) {
-          const from = new Date(filterDate + 'T00:00:00');
-          const to = new Date(filterDate + 'T23:59:59');
-          params.from = from.toISOString();
-          params.to = to.toISOString();
-        }
-        if (filterTipo !== 'all') params.tipo = filterTipo;
-        const resp = await agendamentosAPI.listar(params);
-        itemsResp = resp.items;
-      } catch (e) {
-        // fallback
-        const r2 = await appointmentsAPI.listar();
-        itemsResp = r2.items;
-      }
-      const items = itemsResp || [];
-      setAppointments(items || []);
-    } catch (error) {
-      console.error('❌ Error loading appointments:', error);
-    } finally {
-      setLoadingAppointments(false);
-    }
-  };
 
   const handleDeleteAppointment = async (id) => {
     if (!window.confirm('Tem certeza que deseja cancelar este agendamento?')) return;
@@ -271,12 +290,6 @@ function Chatbot() {
     }
   };
 
-  const handleManualRefresh = async () => {
-    console.log('🔄 Manual refresh requested');
-    setDebugInfo('Atualizando manualmente...');
-    await loadQRCode();
-    await loadStatus();
-  };
 
   const formatStatus = (statusObj) => {
     if (!statusObj) return 'Desconhecido';
@@ -296,7 +309,7 @@ function Chatbot() {
 
   return (
     <div className="chatbot-page">
-      <h1>💬 Chatbot WhatsApp</h1>
+      <h1>Chatbot WhatsApp</h1>
 
       <div className="chatbot-controls">
         <div className="status-card">
@@ -309,7 +322,7 @@ function Chatbot() {
           )}
           {debugInfo && (
             <p style={{ fontSize: '11px', color: '#6b7280', marginTop: '8px', fontFamily: 'monospace' }}>
-              🔍 Debug: {debugInfo}
+              🔍 Observação: {debugInfo}
             </p>
           )}
         </div>
@@ -393,13 +406,7 @@ function Chatbot() {
               3. Toque em <strong>Conectar dispositivo</strong><br/>
               4. Aponte a câmera para o QR Code acima
             </p>
-            <button 
-              onClick={handleManualRefresh}
-              className="btn btn-secondary"
-              style={{ marginTop: '12px', padding: '8px 16px', fontSize: '13px' }}
-            >
-              🔄 Atualizar QR Code
-            </button>
+            {/* QR code atualiza automaticamente a cada 15s */}
           </div>
         )}
 
@@ -421,13 +428,7 @@ function Chatbot() {
               <p style={{ fontSize: '13px', color: '#6b7280' }}>
                 Tentativa: {attemptCountRef.current}
               </p>
-              <button 
-                onClick={handleManualRefresh}
-                className="btn btn-secondary"
-                style={{ marginTop: '16px', padding: '8px 16px', fontSize: '13px' }}
-              >
-                🔄 Tentar Buscar Agora
-              </button>
+              {/* Removido botão manual; atualização é automática */}
             </div>
           </div>
         )}
@@ -436,16 +437,7 @@ function Chatbot() {
       <div className="appointments-card" style={{ marginTop: '24px' }}>
         <h2>📅 Agendamentos</h2>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-          <label style={{ fontSize: 13, color: '#374151' }}>Filtro:</label>
-          <select
-            value={appointmentsFilter}
-            onChange={(e) => setAppointmentsFilter(e.target.value)}
-            className="btn"
-            style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}
-          >
-            <option value="all">Todos</option>
-            <option value="next">Próximo</option>
-          </select>
+          <label style={{ fontSize: 13, color: '#374151' }}>Filtrar por data:</label>
           <input
             type="date"
             value={filterDate}
@@ -453,73 +445,55 @@ function Chatbot() {
             className="btn"
             style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}
           />
-          <select
-            value={filterTipo}
-            onChange={(e) => setFilterTipo(e.target.value)}
-            className="btn"
-            style={{ padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, background: '#fff' }}
-          >
-            <option value="all">Todos os tipos</option>
-            <option value="visita">Visita</option>
-            <option value="reuniao">Reunião online</option>
-          </select>
-          <button className="btn btn-secondary" onClick={loadAppointments}>🔄 Atualizar lista</button>
         </div>
         {loadingAppointments ? (
           <p>Carregando agendamentos...</p>
         ) : (() => {
-          let visible = appointments;
-          if (appointmentsFilter === 'next') {
-            const now = Date.now();
-            const upcoming = appointments
-              .filter(a => new Date(a.data || a.start_time).getTime() >= now)
-              .sort((a, b) => new Date(a.data || a.start_time) - new Date(b.data || b.start_time));
-            visible = upcoming.length > 0 ? [upcoming[0]] : [];
-          }
+          let visible = appointments.slice();
+          const now = Date.now();
+          visible = visible
+            .filter(a => new Date(a.data || a.start_time).getTime() >= now)
+            .sort((a, b) => new Date(a.data || a.start_time) - new Date(b.data || b.start_time));
+
           if (visible.length === 0) {
             return <p>Nenhum agendamento encontrado.</p>;
           }
+
           return (
             <div className="appointments-list" style={{ marginTop: '12px' }}>
-              {visible.map(item => (
-                <div key={item.id} className="appointment-item" style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  padding: '10px 12px',
-                  border: '1px solid #e5e7eb',
-                  borderRadius: '8px',
-                  marginBottom: '8px',
-                  background: '#fff'
-                }}>
-                  <div>
-                    <div style={{ fontWeight: 600 }}>{item.summary || item.resumo}</div>
-                    <div style={{ fontSize: '13px', color: '#374151' }}>
-                      {(() => {
-                        // Preferir campos formatados da API quando existirem
-                        if (item.data_br && item.fim_br) {
-                          return `${item.data_br} — ${new Date(item.fim || item.end_time || item.data).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
-                        }
-                        const start = new Date(item.data || item.start_time);
-                        const end = new Date(item.fim || item.end_time || (start.getTime() + 60 * 60000));
-                        return `${start.toLocaleString('pt-BR')} — ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
-                      })()}
+              {visible.map(item => {
+                const rawTipo = item.tipo || (item.agenda_type === 'online' ? 'reuniao' : 'visita');
+                const tipo = ['online', 'reuniao'].includes(String(rawTipo).toLowerCase()) ? 'reuniao' : 'visita';
+                const cliente = item.cliente_nome || item.client_name || '';
+                const start = new Date(item.data || item.start_time);
+                const end = new Date(item.fim || item.end_time || (start.getTime() + 60 * 60000));
+                const titulo = `${tipo === 'reuniao' ? 'Atendimento - Reunião Online' : 'Atendimento - Visita'}${cliente ? ' | ' + cliente : ''}`;
+                const dataStr = `${start.toLocaleDateString('pt-BR')}, ${start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} — ${end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+                const local = item.local || (tipo === 'reuniao' ? 'Online' : 'Av. Almirante Barroso, 389, Centro – João Pessoa – PB');
+                const tipoLabel = tipo === 'reuniao' ? 'reunião online' : 'visita';
+                return (
+                  <div key={item.id} className="appointment-item" style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '12px 14px',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: '8px',
+                    marginBottom: '10px',
+                    background: '#fff'
+                  }}>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 15 }}>{titulo}</div>
+                      <div style={{ fontSize: '13px', color: '#374151' }}>{dataStr}</div>
+                      <div style={{ fontSize: '12px', color: '#6b7280' }}>{`Tipo: ${tipoLabel} | Local: ${local}`}</div>
                     </div>
-                    <div style={{ fontSize: '12px', color: '#6b7280' }}>
-                      {(() => {
-                        const tipo = item.tipo || (item.agenda_type === 'online' ? 'reuniao' : 'visita');
-                        const cliente = item.cliente_nome || item.client_name || '';
-                        const local = item.local || (tipo === 'reuniao' ? 'Online' : 'Loja');
-                        return `Tipo: ${tipo} ${cliente ? `| Cliente: ${cliente}` : ''} | Local: ${local}`;
-                      })()}
+                    <div>
+                      <button className="btn btn-secondary" style={{ marginRight: 8 }} onClick={() => handleUpdateAppointment(item.id, item)}>✏️ Alterar</button>
+                      <button className="btn btn-danger" onClick={() => handleDeleteAppointment(item.id)}>🗑️ Cancelar</button>
                     </div>
                   </div>
-                  <div>
-                    <button className="btn btn-secondary" style={{ marginRight: 8 }} onClick={() => handleUpdateAppointment(item.id, item)}>✏️ Alterar</button>
-                    <button className="btn btn-danger" onClick={() => handleDeleteAppointment(item.id)}>🗑️ Cancelar</button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           );
         })()}

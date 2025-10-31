@@ -36,6 +36,7 @@ let status = 'disconnected';
 let pausedUntil = null;
 let initializationAttempt = 0;
 let chatPauses = new Map();
+let lastSendError = false;
 
 // ========== FERRAMENTAS DO GOOGLE CALENDAR (ATUALIZADAS) ==========
 
@@ -59,8 +60,12 @@ const calendarTools = [
           },
           tipo: {
             type: 'string',
-            enum: ['online', 'loja'],
-            description: 'Tipo de agendamento: online (reunião) ou loja (visita presencial)',
+            enum: ['online', 'visita'],
+            description: 'Tipo de agendamento: online (reunião) ou visita (presencial)',
+          },
+          eventId: {
+            type: 'string',
+            description: 'Opcional: ID do evento (Google Calendar) para ignorar conflito com o próprio agendamento ao editar',
           },
         },
         required: ['data', 'horario', 'tipo'],
@@ -113,8 +118,8 @@ const calendarTools = [
           },
           tipo: {
             type: 'string',
-            enum: ['online', 'loja'],
-            description: 'Tipo: online (reunião) ou loja (visita presencial)',
+            enum: ['online', 'visita'],
+            description: 'Tipo: online (reunião) ou visita (presencial)',
           },
           duracao: {
             type: 'number',
@@ -273,7 +278,7 @@ function parseBrazilDateTime(dateStr, timeStr) {
 
 async function handleVerificarDisponibilidade(args) {
   try {
-    const { data, horario, tipo } = args;
+    const { data, horario, tipo, eventId } = args;
     
     const start = parseBrazilDateTime(data, horario);
     const end = new Date(start.getTime() + 60 * 60000); // +1 hora
@@ -288,7 +293,11 @@ async function handleVerificarDisponibilidade(args) {
     }
     
     // Verificar conflitos no banco
-    const conflicts = await findConflicts(start, end, tipo);
+    let conflicts = await findConflicts(start, end, tipo);
+    // Ignorar conflito com o próprio evento (quando em edição)
+    if (eventId) {
+      conflicts = conflicts.filter(c => c.calendar_event_id !== eventId);
+    }
     
     if (conflicts.length > 0) {
       return {
@@ -301,7 +310,7 @@ async function handleVerificarDisponibilidade(args) {
     
     return {
       disponivel: true,
-      mensagem: `O horário ${horario} do dia ${data} está disponível para ${tipo === 'online' ? 'reunião online' : 'visita à loja'}!`,
+      mensagem: `O horário ${horario} do dia ${data} está disponível para ${tipo === 'online' ? 'reunião online' : 'visita'}!`,
     };
   } catch (error) {
     console.error('❌ Erro ao verificar disponibilidade:', error);
@@ -367,23 +376,17 @@ async function handleCriarAgendamento(args, phoneNumber) {
     // Verificar conflitos
     const conflicts = await findConflicts(start, end, tipo);
     if (conflicts.length > 0) {
-      // Sugerir alternativas
-      const suggestions = await suggestAlternativeTimes(start, duracao, { agendaType: tipo });
-      // Formatar sugestões para fuso de Brasília
-      const formatted = suggestions.slice(0, 2).map(s => 
-        `${s.start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })} às ${s.start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })}`
-      ).join('\n• ');
-      
+      // Não sugerir automaticamente – pedir o melhor horário ao cliente
       return {
         sucesso: false,
-        mensagem: `Este horário não está mais disponível. Que tal um destes?\n\n• ${formatted}`,
+        mensagem: 'Este horário não está mais disponível. Poderia me informar o melhor horário para você dentro do nosso expediente (08:00–18:00, seg a sex)?',
       };
     }
     
     // Criar agendamento
     const summary = tipo === 'online' 
       ? `Atendimento - Reunião Online | ${cliente_nome}`
-      : `Atendimento - Visita à Loja | ${cliente_nome}`;
+      : `Atendimento - Visita | ${cliente_nome}`;
     
     const description = `Cliente: ${cliente_nome}\nWhatsApp: ${phoneNumber}\nTipo: ${tipo === 'online' ? 'Reunião Online' : 'Visita à Loja'}`;
     
@@ -435,7 +438,7 @@ async function handleCriarAgendamento(args, phoneNumber) {
     // Formatar a data/hora de volta para Brasília para exibir ao usuário
     const dataFormatted = start.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
     const horaFormatted = start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' });
-    const tipoFormatted = tipo === 'online' ? 'Reunião online' : 'Visita à loja';
+    const tipoFormatted = tipo === 'online' ? 'Reunião online' : 'Visita';
     
     let linkText = '';
     if (htmlLink) {
@@ -732,21 +735,21 @@ async function generateChatbotResponse(message, stateObj, contact, phoneNumber) 
   const systemPrompt = `
 Você é *Maria*, assistente virtual da **Artestofados**, empresa especializada em fabricação, reforma e personalização de estofados em *João Pessoa - PB*. 🛋️
 
-Data de hoje: \${dataAtual}
-Ano atual: \${anoAtual}
+Data de hoje: ${dataAtual}
+Ano atual: ${anoAtual}
 
 🎯 PAPEL
-Atender clientes com simpatia, responder *apenas* perguntas relacionadas à Artestofados, e executar as ferramentas de agendamento (criar, editar, cancelar) de forma precisa.
+Atender clientes com simpatia, responder perguntas relacionadas à Artestofados, e executar as ferramentas de agendamento (criar, editar, cancelar) de forma precisa.
 
 📌 IMPORTANTE
-Você só deve responder mensagens que tenham relação com:
+Foque em assuntos como:
 - produtos, serviços e preços da Artestofados
 - fabricação, reforma ou personalização de estofados
 - horários, orçamentos e agendamentos
 - informações sobre localização, atendimento e contato da loja
 
-❌ SE O CLIENTE PERGUNTAR QUALQUER OUTRA COISA (fora da Artestofados):
-Responda educadamente: "Desculpe, posso te ajudar apenas com informações e serviços da Artestofados, tudo bem? 💙"
+Se o cliente falar de algo fora desses temas, não recuse. Responda brevemente e redirecione com simpatia para nossos serviços, por exemplo:
+"Entendi! 😊 Eu ajudo com fabricação e reforma de estofados aqui na Artestofados. Posso te orientar sobre projetos, orçamentos e agendamentos. Como posso te ajudar com seu estofado hoje?"
 
 ---
 
@@ -785,12 +788,12 @@ Após o cliente escolher o tipo de atendimento, pergunte:
 > "Qual seria o melhor dia e horário para você (DD/MM/AAAA e HH:MM)?"
 
 📅 Utilize as ferramentas de agendamento (descritas abaixo):
-- \`verificar_disponibilidade\`
-- \`criar_agendamento\`
-- \`sugerir_horarios\`
-- \`buscar_ultimo_agendamento\`
-- \`editar_agendamento\`
-- \`cancelar_agendamento\`
+- 'verificar_disponibilidade'
+- 'criar_agendamento'
+- 'sugerir_horarios'
+- 'buscar_ultimo_agendamento'
+- 'editar_agendamento'
+- 'cancelar_agendamento'
 
 7️⃣ **Confirmação**
 Depois da criação bem-sucedida:
@@ -807,28 +810,28 @@ Finalize com simpatia:
 
 ➡️ **FLUXO 1: CRIAR NOVO AGENDAMENTO**
 1. Cliente pede para agendar ou menciona data/hora.  
-2. Chame \`verificar_disponibilidade\` com a data, hora e tipo.  
+2. Chame 'verificar_disponibilidade' com a data, hora e tipo.  
 3. [AGUARDE O RESULTADO]  
 4. Se disponível: pergunte o nome completo do cliente (se ainda não souber).  
-5. Com NOME, DATA, HORA e TIPO, chame \`criar_agendamento\`.  
+5. Com NOME, DATA, HORA e TIPO, chame 'criar_agendamento'.  
 6. [AGUARDE O RESULTADO]  
-7. Se ocupado: chame \`sugerir_horarios\` para a data mencionada.  
-8. Repasse a mensagem de sucesso ou erro da ferramenta *exatamente como veio*.
+7. Se ocupado: explique que o horário não está disponível e pergunte qual seria o melhor horário para o cliente dentro do expediente (08:00–18:00).  
+8. Repasse a mensagem de sucesso ou erro da ferramenta exatamente como veio.
 
 ➡️ **FLUXO 2: EDITAR/REMARCAR AGENDAMENTO**
 1. Cliente pede para "editar", "remarcar" ou "alterar".  
-2. Chame \`buscar_ultimo_agendamento\`.  
+2. Chame 'buscar_ultimo_agendamento'.  
 3. [AGUARDE O RESULTADO]  
 4. Mostre o agendamento e pergunte nova data/hora.  
-5. Verifique disponibilidade (\`verificar_disponibilidade\`).  
-6. Se disponível: chame \`editar_agendamento\`.  
-7. Se ocupado: chame \`sugerir_horarios\`.  
+5. Verifique disponibilidade ('verificar_disponibilidade'), passando o 'eventId' do agendamento atual para ignorar conflito consigo mesmo.  
+6. Se disponível: chame 'editar_agendamento'.  
+7. Se ocupado: pergunte qual seria o melhor horário para o cliente dentro do expediente (08:00–18:00).  
 
 ➡️ **FLUXO 3: CANCELAR AGENDAMENTO**
 1. Cliente pede para "cancelar".  
-2. Chame \`buscar_ultimo_agendamento\`.  
+2. Chame 'buscar_ultimo_agendamento'.  
 3. Mostre o agendamento encontrado e peça confirmação.  
-4. Se confirmar, chame \`cancelar_agendamento({ confirmar: true })\`.  
+4. Se confirmar, chame 'cancelar_agendamento({ confirmar: true })'.  
 5. Repasse a mensagem de sucesso ou erro.
 
 ---
@@ -1332,7 +1335,7 @@ async function processChatbotMessage(msg) {
     console.error('❌ ERROR in processChatbotMessage:', error);
     console.error('Stack trace:', error.stack);
     
-    if (status === 'connected' && client) {
+    if (status === 'connected' && client && !lastSendError) {
       try {
         const contact = await msg.getContact();
         const fromNumber = contact.id.user;
@@ -1411,6 +1414,7 @@ async function sendMessage(phoneNumber, response) {
   }
 
   try {
+    lastSendError = false;
     const chatId = phoneNumber.includes('@c.us') 
       ? phoneNumber 
       : `${phoneNumber}@c.us`;
@@ -1433,12 +1437,15 @@ async function sendMessage(phoneNumber, response) {
     console.log('✅ Message sent successfully!');
   } catch (error) {
     console.error('❌ Error sending message:', error);
+    lastSendError = true;
     
     if (error.message.includes('getChat') || error.message.includes('Evaluation failed') || error.message.includes('protocol error')) {
       console.error('🔌 WhatsApp connection likely lost - marking as disconnected');
       status = 'disconnected';
       qrString = ''; // Forçar novo QR
-      client.destroy().catch(err => console.error('Error destroying client after send fail:', err));
+      if (client) {
+        client.destroy().catch(err => console.error('Error destroying client after send fail:', err));
+      }
       client = null;
     }
     

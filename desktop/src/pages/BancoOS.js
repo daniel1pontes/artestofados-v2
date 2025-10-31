@@ -8,6 +8,39 @@ function BancoOS() {
   const [loading, setLoading] = useState(false);
   const [selectedOS, setSelectedOS] = useState(null);
 
+  const formatDateBR = (d) => {
+    if (!d) return '';
+    const s = String(d);
+    // Caso mais comum: 'YYYY-MM-DD' (evitar new Date para não aplicar UTC e perder 1 dia)
+    const isoShort = /^\d{4}-\d{2}-\d{2}$/;
+    if (isoShort.test(s)) {
+      const [yyyy, mm, dd] = s.split('-');
+      return `${dd}-${mm}-${yyyy}`;
+    }
+    try {
+      // Outros formatos: tentar Date, mas isso pode aplicar timezone
+      const date = new Date(s);
+      if (isNaN(date.getTime())) {
+        // Fallback genérico com separadores
+        const parts = s.split(/[-/]/);
+        if (parts.length >= 3) {
+          const [y, m, day] = parts.length === 3 && parts[0].length === 4 ? parts : [parts[2], parts[1], parts[0]];
+          const dd = String(day).padStart(2, '0');
+          const mm = String(m).padStart(2, '0');
+          const yyyy = String(y);
+          return `${dd}-${mm}-${yyyy}`;
+        }
+        return s;
+      }
+      const dd = String(date.getDate()).padStart(2, '0');
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      const yyyy = date.getFullYear();
+      return `${dd}-${mm}-${yyyy}`;
+    } catch {
+      return s;
+    }
+  };
+
   useEffect(() => {
     loadOS();
   }, []);
@@ -89,7 +122,7 @@ function BancoOS() {
 
   return (
     <div className="banco-os-page">
-      <h1>📦 Banco de OS</h1>
+      <h1>Banco de OS</h1>
 
       <div className="search-section">
         <input
@@ -134,7 +167,7 @@ function BancoOS() {
                     <td>{os.clientName}</td>
                     <td>{os.payment}</td>
                     <td>R$ {total.toFixed(2)}</td>
-                    <td>{os.deadline}</td>
+                    <td>{formatDateBR(os.deadline)}</td>
                     <td>
                       <div className="action-buttons">
                         <button onClick={() => handleView(os)} className="btn-view">

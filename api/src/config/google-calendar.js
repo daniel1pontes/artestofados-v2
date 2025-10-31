@@ -89,10 +89,27 @@ function isWithinWorkingHours(dateTime) {
   const hourPart = parts.find(p => p.type === 'hour');
   const minutePart = parts.find(p => p.type === 'minute');
   const weekdayPart = parts.find(p => p.type === 'weekday');
+
   const hour = hourPart ? parseInt(hourPart.value, 10) : date.getUTCHours();
   const minute = minutePart ? parseInt(minutePart.value, 10) : date.getUTCMinutes();
-  const weekdayMap = { 'dom': 0, 'seg': 1, 'ter': 2, 'qua': 3, 'qui': 4, 'sex': 5, 'sáb': 6, 'sab': 6 };
-  const dow = weekdayPart ? weekdayMap[(weekdayPart.value || '').toLowerCase()] : date.getUTCDay();
+
+  // Normaliza o nome do dia da semana em pt-BR (remove ponto final e acentos)
+  let dow;
+  if (weekdayPart && typeof weekdayPart.value === 'string') {
+    const raw = (weekdayPart.value || '').toLowerCase();
+    const cleaned = raw
+      .replace(/\./g, '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    const weekdayMap = { dom: 0, seg: 1, ter: 2, qua: 3, qui: 4, sex: 5, sab: 6 };
+    dow = weekdayMap[cleaned];
+  }
+  if (typeof dow !== 'number') {
+    // Fallback seguro: obtém o DOW considerando o horário de São Paulo
+    // Criamos uma nova data com os componentes em BRT para derivar o dia corretamente
+    const brt = new Date(date.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    dow = brt.getDay();
+  }
 
   const currentMinutes = hour * 60 + minute;
   const startMinutes = (WORK_HOURS.start * 60) + (WORK_HOURS.startMinutes || 0);
@@ -261,9 +278,9 @@ async function createCalendarEventWithValidation(summary, description, startTime
     const availability = await checkTimeSlotAvailability(startTime, endTime, options);
     
     if (!availability.available) {
-      const suggestions = await suggestAlternativeTimes(startTime, options.durationMinutes, options);
       
-      throw new Error(`Horário não disponível. Conflitos encontrados: ${availability.conflicts.length}. Sugestões de horários alternativos: ${suggestions.length} opções disponíveis.`);
+      
+    throw new Error(`Horário não disponível. Conflitos encontrados: ${availability.conflicts.length}.`);
     }
 
     // Criar o evento

@@ -39,7 +39,7 @@
 }
 
 .sidebar-header h1 {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 600;
   color: #333333;
   margin: 0;
@@ -62,7 +62,7 @@
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s ease;
-  font-size: 15px;
+  font-size: 16px;
   color: #666666;
   text-align: left;
   width: 100%;
@@ -79,9 +79,7 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
-.nav-icon {
-  font-size: 20px;
-}
+/* removed emoji icons */
 
 .nav-label {
   font-weight: 500;

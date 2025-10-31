@@ -318,26 +318,43 @@ class PDFService {
   }
 
   adicionarAssinaturas(doc) {
-    if (doc.y > 600) {
-      doc.addPage();
-      doc.y = 100;
-    }
+    // Se o conteúdo atual estiver muito embaixo, cria nova página
+  if (doc.y > 600) {
+    doc.addPage();
+  }
 
-    const dataAtual = new Date().toLocaleDateString('pt-BR');
-    doc
-      .fontSize(11)
-      .font('Helvetica')
-      .text(`João Pessoa, ${dataAtual}`, 350, doc.y)
-      .moveDown(4);
+  // Posição padrão de assinatura no rodapé
+  const posYAssinatura = 720;
+  const dataAtual = new Date().toLocaleDateString('pt-BR');
 
-    const lineY = doc.y;
-    doc.moveTo(100, lineY).lineTo(250, lineY).stroke();
-    doc.moveTo(350, lineY).lineTo(500, lineY).stroke();
+  // Data no canto direito, acima das linhas
+  doc
+    .fontSize(11)
+    .font('Helvetica')
+    .text(`João Pessoa, ${dataAtual}`, 350, posYAssinatura - 50, { align: 'left' });
 
-    doc
-      .fontSize(11)
-      .text('Artestofados', 140, lineY + 15, { align: 'center', width: 110 })
-      .text('Cliente', 390, lineY + 15, { align: 'center', width: 110 });
+  // Linhas de assinatura
+  const linhaInicio1 = 100;
+  const linhaFim1 = 250;
+  const linhaInicio2 = 350;
+  const linhaFim2 = 500;
+
+  doc.moveTo(linhaInicio1, posYAssinatura).lineTo(linhaFim1, posYAssinatura).stroke();
+  doc.moveTo(linhaInicio2, posYAssinatura).lineTo(linhaFim2, posYAssinatura).stroke();
+
+  // Nomes centralizados logo abaixo
+  doc
+    .fontSize(11)
+    .font('Helvetica')
+    .text('Artestofados', linhaInicio1, posYAssinatura + 8, {
+      width: linhaFim1 - linhaInicio1,
+      align: 'center'
+    })
+    .text('Cliente', linhaInicio2, posYAssinatura + 8, {
+      width: linhaFim2 - linhaInicio2,
+      align: 'center'
+    });
+
   }
 
   adicionarImagensUsuario(doc, imagens) {

@@ -1,6 +1,7 @@
 .chatbot-page {
   max-width: 1200px;
   margin: 0 auto;
+  font-size: 14px;
 }
 
 .chatbot-controls {
@@ -9,6 +10,72 @@
   padding: 24px;
   margin-bottom: 24px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.appointments-card {
+  background-color: #ffffff;
+  border-radius: 8px;
+  padding: 24px;
+  margin-bottom: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.appointments-card h2 {
+  font-size: 16px;
+  margin-bottom: 12px;
+  color: #333333;
+}
+
+.appointments-list {
+  margin-top: 12px;
+}
+
+.filters-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.appointment-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  background: #fff;
+}
+
+.appointment-item .title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.appointment-item .datetime {
+  font-size: 14px;
+  color: #374151;
+}
+
+.appointment-item .meta {
+  font-size: 14px;
+  color: #6b7280;
+}
+
+/* Forçar consistência nas fontes, mesmo onde há inline styles */
+.chatbot-page p,
+.chatbot-page label,
+.chatbot-page .btn,
+.chatbot-page select,
+.chatbot-page input {
+  font-size: 14px !important;
+}
+
+.qr-code-container h3 {
+  font-size: 16px !important;
 }
 
 .status-card {

@@ -154,7 +154,7 @@ function GerarOS() {
 
   return (
     <div className="gerar-os-page">
-      <h1>📝 Gerar OS</h1>
+      <h1>Gerar OS</h1>
 
       <form onSubmit={handleSubmit} className="os-form">
         <div className="form-section">
@@ -295,7 +295,7 @@ function GerarOS() {
           borderRadius: '8px',
           border: '2px solid #e5e7eb'
         }}>
-          <h2 style={{ marginBottom: '12px' }}>💰 Resumo Financeiro</h2>
+          <h2 style={{ marginBottom: '12px' }}>Resumo Financeiro</h2>
           <div style={{ fontSize: '16px', lineHeight: '2' }}>
             <p><strong>Subtotal dos Itens:</strong> <span style={{ float: 'right', color: '#666' }}>R$ {calculateSubtotal()}</span></p>
             {formData.discount && parseFloat(formData.discount) > 0 && (

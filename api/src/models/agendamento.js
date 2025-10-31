@@ -3,7 +3,7 @@ const pool = require('../config/database');
 function normalizeAgendaType(type) {
   const t = String(type || '').toLowerCase();
   if (t === 'reuniao' || t === 'online') return 'online';
-  if (t === 'visita' || t === 'presencial' || t === 'loja') return 'loja';
+  if (t === 'visita' || t === 'presencial' || t === 'loja') return 'visita';
   return t;
 }
 
@@ -30,9 +30,9 @@ async function findConflicts(startTime, endTime, agendaType) {
   // Considerar sinônimos antigos salvos no banco
   const typeSet = normalized === 'online' 
     ? ['online'] 
-    : ['loja', 'visita', 'presencial'];
+    : ['visita', 'presencial', 'loja'];
   const result = await pool.query(
-    `SELECT id, summary, start_time, end_time, agenda_type
+    `SELECT id, calendar_event_id, summary, start_time, end_time, agenda_type
        FROM appointments
       WHERE agenda_type = ANY($1)
         AND start_time < $3

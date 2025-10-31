@@ -3,9 +3,9 @@ import './Sidebar.css';
 
 function Sidebar({ activeTab, setActiveTab }) {
   const tabs = [
-    { id: 'chatbot', label: 'Chatbot', icon: '💬' },
-    { id: 'gerar', label: 'Gerar OS', icon: '📝' },
-    { id: 'banco', label: 'Banco de OS', icon: '📦' },
+    { id: 'chatbot', label: 'Chatbot' },
+    { id: 'gerar', label: 'Gerar OS' },
+    { id: 'banco', label: 'Banco de OS' },
   ];
 
   return (
@@ -34,7 +34,6 @@ function Sidebar({ activeTab, setActiveTab }) {
             className={`nav-tab ${activeTab === tab.id ? 'active' : ''}`}
             onClick={() => setActiveTab(tab.id)}
           >
-            <span className="nav-icon">{tab.icon}</span>
             <span className="nav-label">{tab.label}</span>
           </button>
         ))}
