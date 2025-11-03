@@ -61,6 +61,14 @@ function Chatbot() {
     };
   }, []);
 
+  // Auto-refresh agendamentos periodicamente para refletir marcações do cliente
+  useEffect(() => {
+    const id = setInterval(() => {
+      loadAppointments();
+    }, 10000);
+    return () => clearInterval(id);
+  }, [loadAppointments]);
+
   // Auto-refresh appointments when filters change
   useEffect(() => {
     loadAppointments();

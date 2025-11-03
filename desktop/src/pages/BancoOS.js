@@ -7,6 +7,8 @@ function BancoOS() {
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(false);
   const [selectedOS, setSelectedOS] = useState(null);
+  const [showOnlyAtrasados, setShowOnlyAtrasados] = useState(false);
+  const [sortByAtrasoDesc, setSortByAtrasoDesc] = useState(false);
 
   const formatDateBR = (d) => {
     if (!d) return '';
@@ -41,6 +43,50 @@ function BancoOS() {
     }
   };
 
+  const parseLocalDate = (s) => {
+    if (!s) return null;
+    const str = String(s);
+    const isoShort = /^\d{4}-\d{2}-\d{2}$/;
+    if (isoShort.test(str)) {
+      const [yyyy, mm, dd] = str.split('-').map(Number);
+      return new Date(yyyy, mm - 1, dd, 0, 0, 0, 0);
+    }
+    const parts = str.split(/[-/]/);
+    if (parts.length >= 3) {
+      // tenta DD-MM-YYYY ou DD/MM/YYYY
+      let yyyy, mm, dd;
+      if (parts[0].length === 4) {
+        // YYYY-MM-DD
+        yyyy = Number(parts[0]);
+        mm = Number(parts[1]);
+        dd = Number(parts[2]);
+      } else {
+        // DD-MM-YYYY
+        dd = Number(parts[0]);
+        mm = Number(parts[1]);
+        yyyy = Number(parts[2]);
+      }
+      return new Date(yyyy, mm - 1, dd, 0, 0, 0, 0);
+    }
+    const d = new Date(str);
+    if (isNaN(d.getTime())) return null;
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  };
+
+  const calcSituacao = (deadline) => {
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const today = new Date();
+    const todayLocal = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const limit = parseLocalDate(deadline);
+    if (!limit) return { label: '--', days: 0, overdue: false };
+    const diff = Math.floor((limit.getTime() - todayLocal.getTime()) / msPerDay);
+    if (diff < 0) {
+      const daysLate = Math.abs(diff);
+      return { label: String(daysLate).padStart(2, '0'), days: daysLate, overdue: true };
+    }
+    return { label: String(diff).padStart(2, '0'), days: diff, overdue: false };
+  };
+
   useEffect(() => {
     loadOS();
   }, []);
@@ -61,6 +107,14 @@ function BancoOS() {
   useEffect(() => {
     loadOS();
   }, [searchTerm]);
+
+  // Auto-refresh da lista periodicamente
+  useEffect(() => {
+    const id = setInterval(() => {
+      loadOS();
+    }, 10000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleSearch = (e) => {
     setSearchTerm(e.target.value);
@@ -132,6 +186,16 @@ function BancoOS() {
           onChange={handleSearch}
           className="search-input"
         />
+        <div style={{ display: 'flex', gap: 12, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            <input type="checkbox" checked={showOnlyAtrasados} onChange={(e) => setShowOnlyAtrasados(e.target.checked)} />
+            Mostrar apenas atrasados
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            <input type="checkbox" checked={sortByAtrasoDesc} onChange={(e) => setSortByAtrasoDesc(e.target.checked)} />
+            Ordenar por maior atraso primeiro
+          </label>
+        </div>
       </div>
 
       {loading ? (
@@ -150,16 +214,32 @@ function BancoOS() {
                 <th>Pagamento</th>
                 <th>Valor Total da OS</th>
                 <th>Prazo de Entrega</th>
+                <th>Situação</th>
                 <th>Ações</th>
               </tr>
             </thead>
             <tbody>
-              {osList.map(os => {
+              {(() => {
+                let list = osList.slice();
+                if (showOnlyAtrasados) {
+                  list = list.filter(os => calcSituacao(os.deadline).overdue);
+                }
+                if (sortByAtrasoDesc) {
+                  list.sort((a, b) => {
+                    const ca = calcSituacao(a.deadline);
+                    const cb = calcSituacao(b.deadline);
+                    const va = ca.overdue ? ca.days : -ca.days; // overdue maiores primeiro, depois proximidade
+                    const vb = cb.overdue ? cb.days : -cb.days;
+                    return vb - va;
+                  });
+                }
+                return list.map(os => {
                 // Calcular valor total da OS
                 const items = typeof os.items === 'string' ? JSON.parse(os.items) : os.items || [];
                 const subtotal = items.reduce((sum, item) => sum + parseFloat(item.total || 0), 0);
                 const discount = parseFloat(os.discount || 0);
                 const total = subtotal - discount;
+                const situacao = calcSituacao(os.deadline);
                 
                 return (
                   <tr key={os.id}>
@@ -168,6 +248,11 @@ function BancoOS() {
                     <td>{os.payment}</td>
                     <td>R$ {total.toFixed(2)}</td>
                     <td>{formatDateBR(os.deadline)}</td>
+                    <td>
+                      <span className={situacao.overdue ? 'situacao-badge overdue' : 'situacao-badge ok'}>
+                        {situacao.label}
+                      </span>
+                    </td>
                     <td>
                       <div className="action-buttons">
                         <button onClick={() => handleView(os)} className="btn-view">
@@ -187,7 +272,8 @@ function BancoOS() {
                     </td>
                   </tr>
                 );
-              })}
+              });
+              })()}
             </tbody>
           </table>
         </div>
