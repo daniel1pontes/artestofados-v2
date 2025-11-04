@@ -1,0 +1,56 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: osdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  api:
+    build: ./api
+    environment:
+      NODE_ENV: production
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: osdb
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      GOOGLE_SERVICE_ACCOUNT_KEY: /app/credentials/google-service-account.json
+      # Ajuste outras variáveis aqui (ex: OPENAI_API_KEY) via .env ou secrets
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./api/uploads:/app/uploads
+      - ./api/whatsapp-session:/app/whatsapp-session
+      - ./api/credentials:/app/credentials
+    env_file:
+      - ./api/.env
+    restart: always
+
+  frontend:
+    build: ./desktop
+    # Container serve em 80 internamente, não expomos publicamente; Nginx fará o proxy
+    restart: always
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - frontend
+      - api
+    restart: always
+
+volumes:
+  postgres_data:
