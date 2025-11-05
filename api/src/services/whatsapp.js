@@ -1208,6 +1208,7 @@ async function initializeWhatsApp(forceNew = false) {
       }
 
       console.log(`👤 Human replied in chat ${otherId} - auto-pausing for 2 hours`);
+      await markChatAsHumanHandled(otherId);
       pauseChat(otherId, 2);
     } catch (err) {
       console.error('❌ Error in message_create handler:', err);
@@ -1240,14 +1241,6 @@ async function handleIncomingMessage(msg) {
     
     const isEmployee = await checkIfEmployee(fromNumber);
     console.log('👤 Is Employee:', isEmployee);
-    
-    if (isEmployee && status === 'connected') {
-      console.log('💼 Employee replying to client - pausing bot for this chat');
-      console.log(`⏸️ Pausing chat with ${fromNumber} for 2 hours`);
-      
-      await markChatAsHumanHandled(fromNumber);
-      pauseChat(fromNumber, 2);
-    }
 
     await saveMessage(msg.id._serialized, fromNumber, msg.body, msg.timestamp);
     console.log('💾 Message saved to database');
