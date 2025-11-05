@@ -5,6 +5,17 @@ const path = require('path');
 const { exec } = require('child_process');
 const os = require('os');
 
+// Ensure a persistent user data directory for Puppeteer/Chromium
+const tmpUserDataDir = path.resolve(__dirname, '../../whatsapp-session/user-data');
+try {
+  if (!fs.existsSync(tmpUserDataDir)) {
+    fs.mkdirSync(tmpUserDataDir, { recursive: true });
+  }
+  console.log('📁 Using user-data dir:', tmpUserDataDir);
+} catch (e) {
+  console.log('⚠️ Could not ensure user-data dir:', e.message);
+}
+
 // --- Imports Atualizados ---
 // Assumindo que todas estas funções existem nos seus arquivos de config
 const {
