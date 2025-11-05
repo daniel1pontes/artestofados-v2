@@ -1189,6 +1189,27 @@ async function initializeWhatsApp(forceNew = false) {
     await handleIncomingMessage(msg);
   });
 
+  // When a message is created from this account (manual human reply via phone/WA Web),
+  // pause bot for that specific chat so it doesn't interfere
+  client.on('message_create', async (msg) => {
+    try {
+      // Ignore messages not from this account
+      if (!msg.fromMe) return;
+
+      const chat = await msg.getChat();
+      if (chat.isGroup) return;
+
+      // For 1:1 chats, the other participant's number
+      const otherId = chat.id.user; // e.g., '5511999999999'
+      if (!otherId) return;
+
+      console.log(`👤 Human replied in chat ${otherId} - auto-pausing for 2 hours`);
+      pauseChat(otherId, 2);
+    } catch (err) {
+      console.error('❌ Error in message_create handler:', err);
+    }
+  });
+
   console.log('⏳ Client created, waiting for initialization...');
   return client;
 }
