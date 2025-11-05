@@ -3,6 +3,7 @@ const pool = require('../config/database');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const os = require('os');
 
 // --- Imports Atualizados ---
 // Assumindo que todas estas funções existem nos seus arquivos de config
@@ -37,6 +38,8 @@ let pausedUntil = null;
 let initializationAttempt = 0;
 let chatPauses = new Map();
 let lastSendError = false;
+// Track recent bot-sent messages per chat to avoid auto-pausing when the bot itself replies
+let botSentTimestamps = new Map(); // key: chatId (e.g. 5511999999999@c.us), value: unix ms
 
 // ========== FERRAMENTAS DO GOOGLE CALENDAR (ATUALIZADAS) ==========
 
@@ -1072,26 +1075,19 @@ async function initializeWhatsApp(forceNew = false) {
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
         '--disable-gpu',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--disable-extensions',
-        '--disable-sync',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-first-run',
-        '--safebrowsing-disable-auto-update',
-        '--ignore-certificate-errors',
-        '--ignore-ssl-errors',
+        '--disable-dev-shm-usage',
+        '--no-zygote',
+        '--window-size=1920,1080',
         '--disable-features=IsolateOrigins,site-per-process',
         '--disable-blink-features=AutomationControlled',
         '--disable-web-security',
-        '--user-data-dir=/tmp/puppeteer-user-data-' + Math.random().toString(36),
+        `--user-data-dir=${tmpUserDataDir}`,
         '--disable-software-rasterizer',
         '--disable-extensions-file-access-check',
         '--disable-extensions-http-throttling',
+        '--allow-running-insecure-content',
+        '--disable-site-isolation-trials',
       ],
       ignoreHTTPSErrors: true,
       timeout: 60000,
@@ -1202,6 +1198,14 @@ async function initializeWhatsApp(forceNew = false) {
       // For 1:1 chats, the other participant's number
       const otherId = chat.id.user; // e.g., '5511999999999'
       if (!otherId) return;
+
+      // If bot has just sent a message to this chat, do not treat as human reply
+      const chatId = `${otherId}@c.us`;
+      const lastBotTs = botSentTimestamps.get(chatId) || 0;
+      const now = Date.now();
+      if (now - lastBotTs < 10000) { // 10s window
+        return;
+      }
 
       console.log(`👤 Human replied in chat ${otherId} - auto-pausing for 2 hours`);
       pauseChat(otherId, 2);
@@ -1455,6 +1459,15 @@ async function sendMessage(phoneNumber, response) {
     // }
     
     await client.sendMessage(chatId, response);
+    // Mark timestamp so message_create fromMe shortly after is considered bot, not human
+    botSentTimestamps.set(chatId, Date.now());
+    // Cleanup old entries occasionally
+    if (botSentTimestamps.size > 1000) {
+      const now = Date.now();
+      for (const [k, v] of botSentTimestamps.entries()) {
+        if (now - v > 600000) botSentTimestamps.delete(k);
+      }
+    }
     console.log('✅ Message sent successfully!');
   } catch (error) {
     console.error('❌ Error sending message:', error);
