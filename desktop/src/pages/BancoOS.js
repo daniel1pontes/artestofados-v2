@@ -297,7 +297,7 @@ function BancoOS() {
             {selectedOS.showPDF ? (
               <div className="pdf-viewer">
                 <iframe
-                  src={`http://localhost:3000/uploads/${selectedOS.pdfPath}`}
+                  src={`/uploads/${selectedOS.pdfPath}`}
                   width="100%"
                   height="600px"
                   style={{ border: 'none' }}
@@ -351,7 +351,7 @@ function BancoOS() {
                       {(typeof selectedOS.images === 'string' ? JSON.parse(selectedOS.images) : selectedOS.images).map((imageName, index) => (
                         <div key={index} className="image-item">
                           <img 
-                            src={`http://localhost:3000/uploads/${imageName}`}
+                            src={`/uploads/${imageName}`}
                             alt={`Imagem ${index + 1}`}
                             className="os-image"
                             onError={(e) => {

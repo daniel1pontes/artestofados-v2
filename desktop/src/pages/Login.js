@@ -12,18 +12,22 @@ function Login({ onSuccess }) {
     setError('');
     setLoading(true);
 
-    // Simple client-side check with provided defaults
-    const validUser = 'nicholas123';
-    const validPass = 'EstofadosNicholas10';
-
-    // Simulate small delay for UX
     await new Promise((r) => setTimeout(r, 400));
-
-    if (username === validUser && password === validPass) {
-      onSuccess();
-    } else {
-      setError('Usuário ou senha inválidos.');
+    let users = [];
+    try {
+      const raw = localStorage.getItem('users');
+      users = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(users)) users = [];
+    } catch {
+      users = [];
     }
+    if (users.length === 0) {
+      users = [{ username: 'nicholas123', password: 'EstofadosNicholas10' }];
+      localStorage.setItem('users', JSON.stringify(users));
+    }
+
+    const ok = users.some(u => u.username === username && u.password === password);
+    if (ok) onSuccess(); else setError('Usuário ou senha inválidos.');
 
     setLoading(false);
   };
