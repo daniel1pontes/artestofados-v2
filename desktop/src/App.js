@@ -4,7 +4,6 @@ import Chatbot from './pages/Chatbot';
 import GerarOS from './pages/GerarOS';
 import BancoOS from './pages/BancoOS';
 import Login from './pages/Login';
-import Usuarios from './pages/Usuarios';
 import './App.css';
 
 function App() {
@@ -21,8 +20,6 @@ function App() {
         return isAuthed ? <GerarOS /> : <Login onSuccess={() => { setIsAuthed(true); setActiveTab('chatbot'); }} />;
       case 'banco':
         return isAuthed ? <BancoOS /> : <Login onSuccess={() => { setIsAuthed(true); setActiveTab('chatbot'); }} />;
-      case 'usuarios':
-        return isAuthed ? <Usuarios /> : <Login onSuccess={() => { setIsAuthed(true); setActiveTab('chatbot'); }} />;
       default:
         return isAuthed ? <Chatbot /> : <Login onSuccess={() => { setIsAuthed(true); setActiveTab('chatbot'); }} />;
     }

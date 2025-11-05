@@ -6,7 +6,6 @@ function Sidebar({ activeTab, setActiveTab, onLogout }) {
     { id: 'chatbot', label: 'Chatbot' },
     { id: 'gerar', label: 'Gerar OS' },
     { id: 'banco', label: 'Banco de OS' },
-    { id: 'usuarios', label: 'Usuários' },
   ];
 
   return (
