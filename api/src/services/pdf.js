@@ -88,13 +88,23 @@ class PDFService {
   adicionarTabelaItens(doc, dados) {
     const margemEsq = 50;
     const larguraTotal = 495;
-    const colunas = [
-      { header: 'QTD', width: 60 },
-      { header: 'DESCRIÇÃO', width: 175 },
-      { header: 'VALOR UNIT.', width: 85 },
-      { header: 'DESC. (%)', width: 75 },
-      { header: 'VALOR TOTAL', width: 100 },
-    ];
+    const hasItemDiscount = Array.isArray(dados.items) && dados.items.some(it => parseFloat(it.discount || 0) > 0);
+    // Distribuição de colunas: quando não há desconto por item, removemos a coluna "DESC. (%)"
+    const colunas = hasItemDiscount
+      ? [
+          { header: 'QTD', width: 60 },
+          { header: 'DESCRIÇÃO', width: 175 },
+          { header: 'VALOR UNIT.', width: 85 },
+          { header: 'DESC. (%)', width: 75 },
+          { header: 'VALOR TOTAL', width: 100 },
+        ]
+      : [
+          { header: 'QTD', width: 60 },
+          // somamos os 75 da coluna de desconto à descrição para manter 495 total
+          { header: 'DESCRIÇÃO', width: 175 + 75 },
+          { header: 'VALOR UNIT.', width: 85 },
+          { header: 'VALOR TOTAL', width: 100 },
+        ];
 
     let currentY = doc.y;
     const headerHeight = 25;
@@ -154,22 +164,39 @@ class PDFService {
         }
         
         let texto = '';
-        switch(index) {
-          case 0: // Quantidade
-            texto = item.quantity.toString();
-            break;
-          case 1: // Descrição
-            texto = item.description;
-            break;
-          case 2: // Valor Unitário
-            texto = this.formatarMoeda(item.unitValue);
-            break;
-          case 3: // Desconto
-            texto = descontoItem > 0 ? `${descontoItem}%` : '-';
-            break;
-          case 4: // Valor Total
-            texto = this.formatarMoeda(valorFinal);
-            break;
+        if (hasItemDiscount) {
+          switch(index) {
+            case 0: // Quantidade
+              texto = item.quantity.toString();
+              break;
+            case 1: // Descrição
+              texto = item.description;
+              break;
+            case 2: // Valor Unitário
+              texto = this.formatarMoeda(item.unitValue);
+              break;
+            case 3: // Desconto
+              texto = descontoItem > 0 ? `${descontoItem}%` : '-';
+              break;
+            case 4: // Valor Total
+              texto = this.formatarMoeda(valorFinal);
+              break;
+          }
+        } else {
+          switch(index) {
+            case 0: // Quantidade
+              texto = item.quantity.toString();
+              break;
+            case 1: // Descrição
+              texto = item.description;
+              break;
+            case 2: // Valor Unitário
+              texto = this.formatarMoeda(item.unitValue);
+              break;
+            case 3: // Valor Total
+              texto = this.formatarMoeda(valorFinal);
+              break;
+          }
         }
         
         doc.text(texto, posX + 3, currentY + 8, { 
@@ -216,7 +243,8 @@ class PDFService {
     const temDescontoGeral = descontoGeral > 0;
     const temDesconto = temDescontoItem || temDescontoGeral;
 
-    const larguraTexto = colunas[0].width + colunas[1].width + colunas[2].width + colunas[3].width;
+    // largura até antes da última coluna (onde exibimos os valores à direita)
+    const larguraTexto = colunas.slice(0, colunas.length - 1).reduce((acc, c) => acc + c.width, 0);
     const posXValor = margemEsq + larguraTexto;
 
     // Se tiver desconto de ITEM, mostrar SUBTOTAL (valor bruto)
