@@ -38,19 +38,27 @@ services:
 
   frontend:
     build: ./desktop
-    # Container serve em 80 internamente, não expomos publicamente; Nginx fará o proxy
     restart: always
 
   nginx:
     image: nginx:1.27-alpine
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/www:/var/www/certbot:rw
+      - ./nginx/letsencrypt:/etc/letsencrypt:rw
     ports:
       - "80:80"
+      - "443:443"
     depends_on:
       - frontend
       - api
     restart: always
+
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - ./nginx/www:/var/www/certbot:rw
+      - ./nginx/letsencrypt:/etc/letsencrypt:rw
 
 volumes:
   postgres_data:
