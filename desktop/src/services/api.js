@@ -1,7 +1,10 @@
 import axios from 'axios';
 
+const envUrl = process.env.REACT_APP_API_URL;
+const isLocalEnvUrl = envUrl && /(localhost|127\.0\.0\.1)/i.test(envUrl);
+// Default: same-origin ('') so prod usa o mesmo host do frontend via Nginx
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || '',
+  baseURL: !envUrl || isLocalEnvUrl ? '' : envUrl,
   timeout: 30000,
 });
 

@@ -89,17 +89,8 @@ function GerarOS() {
         formDataToSend.append('images', image);
       });
 
-      const response = await fetch('http://localhost:3000/os/criar', {
-        method: 'POST',
-        body: formDataToSend,
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Erro ao criar OS');
-      }
-
-      const result = await response.json();
+      // Use axios client with baseURL from REACT_APP_API_URL
+      const result = await osAPI.criar(formDataToSend);
       console.log('✅ OS created:', result);
       setSuccess(true);
       
@@ -110,7 +101,7 @@ function GerarOS() {
       }, 3000);
     } catch (error) {
       console.error('❌ Error creating OS:', error);
-      alert('Erro ao criar OS: ' + error.message);
+      alert('Erro ao criar OS: ' + (error?.response?.data?.error || error.message));
     } finally {
       setLoading(false);
     }
