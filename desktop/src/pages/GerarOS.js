@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { osAPI } from '../services/api';
-import './GerarOS.css';
+import React, { useState } from "react";
+import { osAPI } from "../services/api";
+import "./GerarOS.css";
 
 // 📝 OBSERVAÇÕES IMPORTANTES:
 // 1. Este código mantém EXATAMENTE a mesma estrutura de cálculo do desktop antigo
@@ -10,13 +10,13 @@ import './GerarOS.css';
 
 function GerarOS() {
   const [formData, setFormData] = useState({
-    clientName: '',
-    deadline: '',
-    payment: '',
+    clientName: "",
+    deadline: "",
+    payment: "",
     items: [
-      { description: '', quantity: '', unitValue: '', discount: 0, total: '' }
+      { description: "", quantity: "", unitValue: "", discount: 0, total: "" },
     ],
-    discount: '',
+    discount: "",
     images: [],
   });
 
@@ -25,7 +25,7 @@ function GerarOS() {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleItemChange = (index, field, value) => {
@@ -33,40 +33,49 @@ function GerarOS() {
     items[index][field] = value;
 
     // Recalcular total quando mudar quantidade, valor unitário ou desconto do item
-    if (field === 'quantity' || field === 'unitValue' || field === 'discount') {
+    if (field === "quantity" || field === "unitValue" || field === "discount") {
       const qty = parseFloat(items[index].quantity) || 0;
       const unitVal = parseFloat(items[index].unitValue) || 0;
       const itemDiscount = parseFloat(items[index].discount) || 0;
-      
+
       // Calcular subtotal do item
       let subtotal = qty * unitVal;
-      
+
       // Aplicar desconto do item
-      let totalItem = subtotal - (subtotal * itemDiscount / 100);
-      
+      let totalItem = subtotal - (subtotal * itemDiscount) / 100;
+
       items[index].total = totalItem.toFixed(2);
     }
 
-    setFormData(prev => ({ ...prev, items }));
+    setFormData((prev) => ({ ...prev, items }));
   };
 
   const addItem = () => {
-    setFormData(prev => ({
+    setFormData((prev) => ({
       ...prev,
-      items: [...prev.items, { description: '', quantity: '', unitValue: '', discount: 0, total: '' }]
+      items: [
+        ...prev.items,
+        {
+          description: "",
+          quantity: "",
+          unitValue: "",
+          discount: 0,
+          total: "",
+        },
+      ],
     }));
   };
 
   const removeItem = (index) => {
     const items = formData.items.filter((_, i) => i !== index);
-    setFormData(prev => ({ ...prev, items }));
+    setFormData((prev) => ({ ...prev, items }));
   };
 
   const handleImageChange = (e) => {
     const files = Array.from(e.target.files);
-    setFormData(prev => ({
+    setFormData((prev) => ({
       ...prev,
-      images: [...prev.images, ...files]
+      images: [...prev.images, ...files],
     }));
   };
 
@@ -78,30 +87,36 @@ function GerarOS() {
     try {
       // Create FormData for file upload
       const formDataToSend = new FormData();
-      formDataToSend.append('clientName', formData.clientName);
-      formDataToSend.append('deadline', formData.deadline);
-      formDataToSend.append('payment', formData.payment);
-      formDataToSend.append('items', JSON.stringify(formData.items));
-      formDataToSend.append('discount', formData.discount || 0);
-      
+      formDataToSend.append("clientName", formData.clientName);
+      formDataToSend.append("deadline", formData.deadline);
+      formDataToSend.append("payment", formData.payment);
+      formDataToSend.append("items", JSON.stringify(formData.items));
+      formDataToSend.append("discount", formData.discount || 0);
+
       // Add images
       formData.images.forEach((image, index) => {
-        formDataToSend.append('images', image);
+        formDataToSend.append("images", image);
       });
 
       // Use axios client with baseURL from REACT_APP_API_URL
       const result = await osAPI.criar(formDataToSend);
-      console.log('✅ OS created:', result);
+      console.log("✅ OS created:", result);
       setSuccess(true);
-      
-      alert(`✅ OS gerada com sucesso!\n\nCliente: ${formData.clientName}\nTotal: ${calculateTotal()}`);
-      
+
+      alert(
+        `✅ OS gerada com sucesso!\n\nCliente: ${
+          formData.clientName
+        }\nTotal: ${calculateTotal()}`
+      );
+
       setTimeout(() => {
         resetForm();
       }, 3000);
     } catch (error) {
-      console.error('❌ Error creating OS:', error);
-      alert('Erro ao criar OS: ' + (error?.response?.data?.error || error.message));
+      console.error("❌ Error creating OS:", error);
+      alert(
+        "Erro ao criar OS: " + (error?.response?.data?.error || error.message)
+      );
     } finally {
       setLoading(false);
     }
@@ -109,11 +124,19 @@ function GerarOS() {
 
   const resetForm = () => {
     setFormData({
-      clientName: '',
-      deadline: '',
-      payment: '',
-      items: [{ description: '', quantity: '', unitValue: '', discount: 0, total: '' }],
-      discount: '',
+      clientName: "",
+      deadline: "",
+      payment: "",
+      items: [
+        {
+          description: "",
+          quantity: "",
+          unitValue: "",
+          discount: 0,
+          total: "",
+        },
+      ],
+      discount: "",
       images: [],
     });
     setSuccess(false);
@@ -121,18 +144,24 @@ function GerarOS() {
 
   const calculateTotal = () => {
     // Calcular subtotal dos itens (já com desconto por item aplicado)
-    const subtotal = formData.items.reduce((sum, item) => sum + parseFloat(item.total || 0), 0);
-    
+    const subtotal = formData.items.reduce(
+      (sum, item) => sum + parseFloat(item.total || 0),
+      0
+    );
+
     // Aplicar desconto geral
     const generalDiscount = parseFloat(formData.discount || 0);
     const discountAmount = (subtotal * generalDiscount) / 100;
     const total = subtotal - discountAmount;
-    
+
     return total.toFixed(2);
   };
 
   const calculateSubtotal = () => {
-    const subtotal = formData.items.reduce((sum, item) => sum + parseFloat(item.total || 0), 0);
+    const subtotal = formData.items.reduce(
+      (sum, item) => sum + parseFloat(item.total || 0),
+      0
+    );
     return subtotal.toFixed(2);
   };
 
@@ -193,12 +222,19 @@ function GerarOS() {
             <div key={index} className="item-row">
               <div className="form-group">
                 <label>Descrição *</label>
-                <input
-                  type="text"
+                <textarea
                   value={item.description}
-                  onChange={(e) => handleItemChange(index, 'description', e.target.value)}
+                  onChange={(e) =>
+                    handleItemChange(index, "description", e.target.value)
+                  }
                   placeholder="Ex: Sofá 3 lugares"
                   required
+                  rows={2}
+                  style={{
+                    resize: "vertical",
+                    minHeight: "50px",
+                    maxHeight: "200px",
+                  }}
                 />
               </div>
               <div className="form-group">
@@ -208,7 +244,9 @@ function GerarOS() {
                   step="1"
                   min="1"
                   value={item.quantity}
-                  onChange={(e) => handleItemChange(index, 'quantity', e.target.value)}
+                  onChange={(e) =>
+                    handleItemChange(index, "quantity", e.target.value)
+                  }
                   required
                 />
               </div>
@@ -219,7 +257,9 @@ function GerarOS() {
                   step="0.01"
                   min="0"
                   value={item.unitValue}
-                  onChange={(e) => handleItemChange(index, 'unitValue', e.target.value)}
+                  onChange={(e) =>
+                    handleItemChange(index, "unitValue", e.target.value)
+                  }
                   placeholder="0.00"
                   required
                 />
@@ -232,7 +272,9 @@ function GerarOS() {
                   min="0"
                   max="100"
                   value={item.discount}
-                  onChange={(e) => handleItemChange(index, 'discount', e.target.value)}
+                  onChange={(e) =>
+                    handleItemChange(index, "discount", e.target.value)
+                  }
                   placeholder="0"
                 />
               </div>
@@ -240,9 +282,13 @@ function GerarOS() {
                 <label>Total Item</label>
                 <input
                   type="text"
-                  value={item.total ? `R$ ${parseFloat(item.total).toFixed(2)}` : 'R$ 0.00'}
+                  value={
+                    item.total
+                      ? `R$ ${parseFloat(item.total).toFixed(2)}`
+                      : "R$ 0.00"
+                  }
                   disabled
-                  style={{ backgroundColor: '#f0f0f0', fontWeight: '600' }}
+                  style={{ backgroundColor: "#f0f0f0", fontWeight: "600" }}
                 />
               </div>
               {formData.items.length > 1 && (
@@ -280,22 +326,43 @@ function GerarOS() {
           </div>
         </div>
 
-        <div className="form-section" style={{
-          backgroundColor: '#f8f9fa',
-          padding: '20px',
-          borderRadius: '8px',
-          border: '2px solid #e5e7eb'
-        }}>
-          <h2 style={{ marginBottom: '12px' }}>Resumo Financeiro</h2>
-          <div style={{ fontSize: '16px', lineHeight: '2' }}>
-            <p><strong>Subtotal dos Itens:</strong> <span style={{ float: 'right', color: '#666' }}>R$ {calculateSubtotal()}</span></p>
+        <div
+          className="form-section"
+          style={{
+            backgroundColor: "#f8f9fa",
+            padding: "20px",
+            borderRadius: "8px",
+            border: "2px solid #e5e7eb",
+          }}
+        >
+          <h2 style={{ marginBottom: "12px" }}>Resumo Financeiro</h2>
+          <div style={{ fontSize: "16px", lineHeight: "2" }}>
+            <p>
+              <strong>Subtotal dos Itens:</strong>{" "}
+              <span style={{ float: "right", color: "#666" }}>
+                R$ {calculateSubtotal()}
+              </span>
+            </p>
             {formData.discount && parseFloat(formData.discount) > 0 && (
-              <p><strong>Desconto Geral ({formData.discount}%):</strong> <span style={{ float: 'right', color: '#dc3545' }}>- R$ {calculateGeneralDiscount()}</span></p>
+              <p>
+                <strong>Desconto Geral ({formData.discount}%):</strong>{" "}
+                <span style={{ float: "right", color: "#dc3545" }}>
+                  - R$ {calculateGeneralDiscount()}
+                </span>
+              </p>
             )}
-            <hr style={{ margin: '10px 0', border: 'none', borderTop: '2px solid #dee2e6' }} />
-            <p style={{ fontSize: '20px', color: '#28a745', fontWeight: '700' }}>
-              <strong>TOTAL DA OS:</strong> 
-              <span style={{ float: 'right' }}>R$ {calculateTotal()}</span>
+            <hr
+              style={{
+                margin: "10px 0",
+                border: "none",
+                borderTop: "2px solid #dee2e6",
+              }}
+            />
+            <p
+              style={{ fontSize: "20px", color: "#28a745", fontWeight: "700" }}
+            >
+              <strong>TOTAL DA OS:</strong>
+              <span style={{ float: "right" }}>R$ {calculateTotal()}</span>
             </p>
           </div>
         </div>
@@ -324,12 +391,10 @@ function GerarOS() {
 
         <div className="form-actions">
           <button type="submit" disabled={loading} className="btn-submit">
-            {loading ? '⏳ Gerando OS...' : '✅ Gerar OS'}
+            {loading ? "⏳ Gerando OS..." : "✅ Gerar OS"}
           </button>
           {success && (
-            <div className="success-message">
-              ✅ OS gerada com sucesso!
-            </div>
+            <div className="success-message">✅ OS gerada com sucesso!</div>
           )}
         </div>
       </form>

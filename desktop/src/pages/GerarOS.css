@@ -73,11 +73,32 @@
   cursor: not-allowed;
 }
 
+.form-group textarea {
+  padding: 12px 16px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  transition: all 0.2s;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 50px;
+  max-height: 200px;
+  line-height: 1.4;
+}
+
+.form-group textarea:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+}
+
 .item-row {
   display: grid;
   grid-template-columns: 2fr 0.8fr 1fr 0.8fr 1fr auto;
   gap: 12px;
-  align-items: end;
+  align-items: start;
   margin-bottom: 20px;
   padding: 16px;
   background-color: #f8f9fa;
@@ -213,16 +234,16 @@
     gap: 8px;
     padding: 12px;
   }
-  
+
   .form-group input {
     padding: 8px 10px;
     font-size: 12px;
   }
-  
+
   .form-group label {
     font-size: 12px;
   }
-  
+
   .btn-remove {
     padding: 6px 10px;
     font-size: 12px;
@@ -235,16 +256,16 @@
     gap: 6px;
     padding: 10px;
   }
-  
+
   .form-group input {
     padding: 6px 8px;
     font-size: 11px;
   }
-  
+
   .form-group label {
     font-size: 11px;
   }
-  
+
   .btn-remove {
     padding: 4px 8px;
     font-size: 11px;
@@ -257,7 +278,7 @@
     gap: 12px;
     padding: 12px;
   }
-  
+
   .item-row .form-group {
     margin-bottom: 0;
   }
@@ -285,7 +306,7 @@
     gap: 16px;
     padding: 16px;
   }
-  
+
   .item-row .form-group {
     margin-bottom: 0;
   }
@@ -313,17 +334,17 @@
     padding: 16px;
     margin: 10px;
   }
-  
+
   .item-row {
     padding: 12px;
     gap: 12px;
   }
-  
+
   .form-group input {
     padding: 8px 10px;
     font-size: 12px;
   }
-  
+
   .form-group label {
     font-size: 12px;
   }
